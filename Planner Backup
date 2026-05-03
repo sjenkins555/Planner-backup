@@ -53,9 +53,6 @@ function allSheetDefs() {
     'Notes':      ['Email','Content','UpdatedAt'],
     'Links':      ['Email','LinksJSON'],
     'Prefs':      ['Email','PrefsJSON'],
-    'Flashcards': ['Email','SetName','CardsJSON'],
-    'Goals':      ['Email','GoalsJSON'],
-    'Grades':     ['Email','GradesJSON'],
     'AssignedLinks': ['ID','AssignedTo','Label','URL','IconUrl','AssignedBy','AssignedAt'],
     'LunchMenu':  ['Date','Main','Side1','Side2','Side3','Vegetarian','Notes'],
     'EmbeddedDocs':['ID','AssignedTo','Title','URL','DocType','AssignedBy','AssignedAt'],
@@ -63,7 +60,8 @@ function allSheetDefs() {
     'RowTransactions':['ID','StudentEmail','TeacherEmail','Type','Amount','Category','Description','Status','CreatedAt','ResolvedAt','Comment'],
     'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
     'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
-    'BellScheduleConfig':['Key','Value']
+    'BellScheduleConfig':['Key','Value'],
+    'EventStatus':['Email','EventID','Completed','UpdatedAt']
   };
 }
 
@@ -113,7 +111,6 @@ function showUrlReminder() {
 
 // ─── CORE HELPERS ─────────────────────────────────────────────
 function getSheet(name) { return SpreadsheetApp.openById('1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y').getSheetByName(name); }
-function generateId()   { return Utilities.getUuid(); }
 
 // ─── LIBRARY CONNECTION CHECK ─────────────────────────────────
 // Calls into the Test Library to confirm the import is wired up.
@@ -132,10 +129,6 @@ function getEmail() {
   let e=''; try{e=Session.getActiveUser().getEmail();}catch(_){}
   if(!e) try{e=Session.getEffectiveUser().getEmail();}catch(_){}
   return e;
-}
-function safeDate(val) {
-  if(!val) return '';
-  try{return Utilities.formatDate(new Date(val),Session.getScriptTimeZone(),'yyyy-MM-dd');}catch(e){return String(val);}
 }
 
 // ─── FIX: safeTime converts Sheets time fractions/Dates to HH:MM strings ─────
@@ -167,47 +160,18 @@ function isTeacherEmail(email) { return Lib.isTeacherEmail(email); }
 
 function updateMyName(name) { return Lib.updateMyName(name); }
 
-// ─── CALENDAR LIST ─────────────────────────────────────────────
-// Returns the user's Google Calendar list so the front-end can show toggles.
-// Requires the Calendar advanced service to be enabled, OR falls back gracefully.
-function getMyCalendars() {
-  try {
-    var cals = [];
-    // Try the Calendar API advanced service first (must be enabled in Apps Script)
-    if (typeof Calendar !== 'undefined' && Calendar.CalendarList) {
-      var list = Calendar.CalendarList.list({minAccessRole: 'reader', maxResults: 50});
-      if (list && list.items) {
-        list.items.forEach(function(c) {
-          cals.push({
-            id: c.id,
-            name: c.summary || c.id,
-            color: c.backgroundColor || '#6366f1',
-            primary: !!c.primary
-          });
-        });
-        // Put primary first
-        cals.sort(function(a,b){ return (b.primary?1:0)-(a.primary?1:0); });
-        return cals;
-      }
-    }
-    // Fallback: use CalendarApp (always available, gives less detail)
-    var calApp = CalendarApp.getAllCalendars();
-    calApp.forEach(function(c) {
-      cals.push({
-        id: c.getId(),
-        name: c.getName(),
-        color: c.getColor() || '#6366f1',
-        primary: c.getId() === getEmail()
-      });
-    });
-    cals.sort(function(a,b){ return (b.primary?1:0)-(a.primary?1:0); });
-    return cals;
-  } catch(e) {
-    // Return just the primary calendar so the page still works
-    var email = getEmail();
-    return [{id: email, name: 'My Calendar', color: '#6366f1', primary: true}];
-  }
-}
+// ─── CALENDAR LIST ────────────────────────────────────────────
+function getMyCalendars() { return Lib.getMyCalendars(); }
+
+// ─── CALENDAR EVENTS (custom views) ───────────────────────────
+function getMyCalendarsList() { return Lib.getMyCalendarsList(); }
+function getCalendarEvents(startDate, endDate, hiddenCalIdsJson) { return Lib.getCalendarEvents(startDate, endDate, hiddenCalIdsJson); }
+function createCalendarEvent(payloadJson) { return Lib.createCalendarEvent(payloadJson); }
+function updateCalendarEvent(payloadJson) { return Lib.updateCalendarEvent(payloadJson); }
+function deleteCalendarEvent(calendarId, eventId) { return Lib.deleteCalendarEvent(calendarId, eventId); }
+function getMyEventStatuses() { return Lib.getMyEventStatuses(); }
+function setEventStatus(eventId, completed) { return Lib.setEventStatus(eventId, completed); }
+function getCalendarPageData(startDate, endDate, hiddenCalIdsJson) { return Lib.getCalendarPageData(startDate, endDate, hiddenCalIdsJson); }
 
 // ─── PREFS ────────────────────────────────────────────────────
 function getMyPrefs() { return Lib.getMyPrefs(); }
@@ -250,74 +214,14 @@ function getTeacherEmbeddedDocs() { return Lib.getTeacherEmbeddedDocs(); }
 function createEmbeddedDoc(title, url, docType, targetType, targetValue) { return Lib.createEmbeddedDoc(title, url, docType, targetType, targetValue); }
 function deleteEmbeddedDoc(id) { return Lib.deleteEmbeddedDoc(id); }
 
-// ─── FLASHCARDS ───────────────────────────────────────────────
-function getMyFlashcardSets() {
-  const email=getEmail(); const sheet=getSheet('Flashcards'); if(!sheet) return [];
-  const data=sheet.getDataRange().getValues(); const sets=[];
-  for(let i=1;i<data.length;i++){
-    if(data[i][0]===email){try{sets.push({name:data[i][1],cards:JSON.parse(data[i][2]||'[]')});}catch(e){sets.push({name:data[i][1],cards:[]});}}
-  }
-  return sets;
-}
-function saveFlashcardSet(setName,cardsJson) {
-  const email=getEmail(); const sheet=getSheet('Flashcards'); if(!sheet) return{success:false};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email&&data[i][1]===setName){sheet.getRange(i+1,3).setValue(cardsJson);return{success:true};}}
-  sheet.appendRow([email,setName,cardsJson]); return{success:true};
-}
-function deleteFlashcardSet(setName) {
-  const email=getEmail(); const sheet=getSheet('Flashcards'); if(!sheet) return{success:false};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email&&data[i][1]===setName){sheet.deleteRow(i+1);return{success:true};}}
-  return{success:false};
-}
-
-// ─── GOALS ────────────────────────────────────────────────────
-function getMyGoals() {
-  const email=getEmail(); const sheet=getSheet('Goals'); if(!sheet) return{goals:[]};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email){try{return{goals:JSON.parse(data[i][1]||'[]')};}catch(e){return{goals:[]};} }}
-  return{goals:[]};
-}
-function saveMyGoals(goalsJson) {
-  const email=getEmail(); const sheet=getSheet('Goals'); if(!sheet) return{success:false};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email){sheet.getRange(i+1,2).setValue(goalsJson);return{success:true};}}
-  sheet.appendRow([email,goalsJson]); return{success:true};
-}
-
-// ─── GRADES ───────────────────────────────────────────────────
-function getMyGrades() {
-  const email=getEmail(); const sheet=getSheet('Grades'); if(!sheet) return{grades:[]};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email){try{return{grades:JSON.parse(data[i][1]||'[]')};}catch(e){return{grades:[]};} }}
-  return{grades:[]};
-}
-function saveMyGrades(gradesJson) {
-  const email=getEmail(); const sheet=getSheet('Grades'); if(!sheet) return{success:false};
-  const data=sheet.getDataRange().getValues();
-  for(let i=1;i<data.length;i++){if(data[i][0]===email){sheet.getRange(i+1,2).setValue(gradesJson);return{success:true};}}
-  sheet.appendRow([email,gradesJson]); return{success:true};
-}
-
-// ─── GROUPS / STUDENTS / PUSH ─────────────────────────────────
-function getGroups() {
-  const s=getSheet('Groups');if(!s)return[];
-  const d=s.getDataRange().getValues();const g=[];
-  for(let i=1;i<d.length;i++){if(d[i][0])g.push({name:d[i][0],emails:d[i][1]?String(d[i][1]).split(',').map(e=>e.trim()).filter(Boolean):[]});}
-  return g;
-}
+// ─── GROUPS / STUDENTS ────────────────────────────────────────
+function getGroups() { return Lib.getGroups(); }
 
 function saveGroup(name, emailsArr) { return Lib.saveGroup(name, emailsArr); }
 
 function deleteGroup(name) { return Lib.deleteGroup(name); }
 
-function getStudentList() {
-  const s=getSheet('Users');if(!s)return[];
-  const d=s.getDataRange().getValues();const students=[];
-  for(let i=1;i<d.length;i++){if(d[i][2]==='student')students.push({email:d[i][0],name:d[i][1],group:d[i][3]||''});}
-  return students.sort((a,b)=>a.name.localeCompare(b.name));
-}
+function getStudentList() { return Lib.getStudentList(); }
 
 function pushAssignment(targetType, targetValue, title, subject, dueDate, priority, notes) { return Lib.pushAssignment(targetType, targetValue, title, subject, dueDate, priority, notes); }
 

@@ -1,0 +1,1646 @@
+// ════════════════════════════════════════════════════════════
+// CEDAR HOLLOW LIBRARY — TEST
+// Edit and break things here freely. Promote to LIVE when ready.
+// ════════════════════════════════════════════════════════════
+
+// Library version marker — bump this each time you publish a new version
+const LIB_VERSION = '0.9.0-batch8-admin';
+
+// ─── CONFIG ──────────────────────────────────────────────────
+// The library reads/writes from a specific spreadsheet.
+// IMPORTANT: This is the TEST sheet. The Live Library will use the Live sheet ID.
+const PLANNER_SHEET_ID = '1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y';
+
+// ─── SANITY CHECK ────────────────────────────────────────────
+function ping() {
+  return 'pong from Test Library v' + LIB_VERSION;
+}
+
+// ─── CORE HELPERS ────────────────────────────────────────────
+function getSheet(name) {
+  return SpreadsheetApp.openById(PLANNER_SHEET_ID).getSheetByName(name);
+}
+
+function generateId() {
+  return Utilities.getUuid();
+}
+
+function getEmail() {
+  let e = '';
+  try { e = Session.getActiveUser().getEmail(); } catch(_){}
+  if (!e) try { e = Session.getEffectiveUser().getEmail(); } catch(_){}
+  return e;
+}
+
+function safeDate(val) {
+  if (!val) return '';
+  try { return Utilities.formatDate(new Date(val), Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+  catch(e) { return String(val); }
+}
+
+function safeTime(val) {
+  if (val === null || val === undefined || val === '') return '';
+  if (typeof val === 'number') {
+    var totalMin = Math.round(val * 24 * 60);
+    var h = Math.floor(totalMin / 60) % 24;
+    var m = totalMin % 60;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+  if (val instanceof Date) {
+    return String(val.getHours()).padStart(2, '0') + ':' + String(val.getMinutes()).padStart(2, '0');
+  }
+  return String(val);
+}
+
+// ─── USER IDENTITY ───────────────────────────────────────────
+function getCurrentUser() {
+  try {
+    const email = getEmail();
+    if (!email) {
+      return {
+        error: 'EMPTY_EMAIL',
+        message: 'Google could not detect your account.\n\nFix: Deploy → Manage Deployments → ✏️ → "Execute as: Me" → New Version → Deploy.'
+      };
+    }
+    const sheet = getSheet('Users');
+    if (!sheet) return {
+      error: 'NO_SHEET',
+      message: 'Users sheet missing. Open 🎓 Planner Admin → Repair Missing Sheets.'
+    };
+    const data = sheet.getDataRange().getValues();
+    let realRole = null, name = '', group = '';
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === email) {
+        realRole = data[i][2];
+        name = data[i][1];
+        group = data[i][3] || '';
+        break;
+      }
+    }
+    if (realRole === null) {
+      const parts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+      name = parts.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      realRole = isTeacherEmail(email) ? 'teacher' : 'student';
+      sheet.appendRow([email, name, realRole, '', new Date().toISOString()]);
+    }
+    // Honor view-as-student override if the real user is actually a teacher
+    let viewAs = null;
+    try {
+      viewAs = PropertiesService.getUserProperties().getProperty('viewAsRole');
+    } catch(e) {}
+    let displayRole = realRole;
+    if (realRole === 'teacher' && viewAs === 'student') {
+      displayRole = 'student';
+    }
+    return {
+      email: email,
+      name: name,
+      role: displayRole,
+      realRole: realRole,
+      group: group
+    };
+  } catch(e) {
+    return {error: 'EXCEPTION', message: e.toString()};
+  }
+}
+
+function isTeacherEmail(email) {
+  try {
+    const data = getSheet('Config').getDataRange().getValues();
+    for (const r of data) {
+      if (r[0] === 'TEACHER_EMAILS') {
+        return String(r[1]).split(',').map(e => e.trim().toLowerCase()).includes(email.toLowerCase());
+      }
+    }
+  } catch(e) {}
+  return false;
+}
+
+function updateMyName(name) {
+  const email = getEmail();
+  const sheet = getSheet('Users');
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === email) {
+      sheet.getRange(i + 1, 2).setValue(name);
+      return {success: true};
+    }
+  }
+  return {success: false};
+}
+
+function setViewAsRole(role) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, error: u.message};
+    if (u.realRole !== 'teacher') return {success: false, error: 'Only teachers can use view-as mode.'};
+    var props = PropertiesService.getUserProperties();
+    if (role === 'student') {
+      props.setProperty('viewAsRole', 'student');
+    } else {
+      props.deleteProperty('viewAsRole');
+    }
+    return {success: true};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function getViewAsRole() {
+  try {
+    var role = PropertiesService.getUserProperties().getProperty('viewAsRole');
+    return {success: true, viewAs: role || null};
+  } catch(e) {
+    return {success: true, viewAs: null};
+  }
+}
+
+// ─── TASKS ───────────────────────────────────────────────────
+function getMyTasks() {
+  const user = getCurrentUser();
+  if (user.error) return [];
+  return getTasksForEmail(user.email);
+}
+
+function getTasksForEmail(email) {
+  const sheet = getSheet('Tasks');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const tasks = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1] === email && data[i][6] !== 'deleted') {
+      tasks.push({
+        id: data[i][0],
+        title: data[i][2],
+        subject: data[i][3] || '',
+        dueDate: safeDate(data[i][4]),
+        priority: data[i][5] || 'medium',
+        status: data[i][6] || 'pending',
+        notes: data[i][7] || '',
+        assignedBy: data[i][8] || ''
+      });
+    }
+  }
+  return tasks.sort((a, b) => {
+    if (a.status === 'completed' && b.status !== 'completed') return 1;
+    if (a.status !== 'completed' && b.status === 'completed') return -1;
+    if (!a.dueDate && b.dueDate) return 1;
+    if (a.dueDate && !b.dueDate) return -1;
+    if (a.dueDate && b.dueDate) return new Date(a.dueDate) - new Date(b.dueDate);
+    return 0;
+  });
+}
+
+function addMyTask(title, subject, dueDate, priority, notes) {
+  const user = getCurrentUser();
+  if (user.error) return {success: false};
+  return _addTask(user.email, title, subject, dueDate, priority, notes, user.email);
+}
+
+function _addTask(assignedTo, title, subject, dueDate, priority, notes, assignedBy) {
+  const id = generateId();
+  getSheet('Tasks').appendRow([
+    id,
+    assignedTo,
+    title,
+    subject || '',
+    dueDate || '',
+    priority || 'medium',
+    'pending',
+    notes || '',
+    assignedBy || '',
+    new Date().toISOString()
+  ]);
+  return {success: true, id: id};
+}
+
+function setTaskStatus(taskId, status) {
+  const data = getSheet('Tasks').getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === taskId) {
+      getSheet('Tasks').getRange(i + 1, 7).setValue(status);
+      return {success: true};
+    }
+  }
+  return {success: false};
+}
+
+function deleteTask(taskId) {
+  return setTaskStatus(taskId, 'deleted');
+}
+
+function updateTask(taskId, title, subject, dueDate, priority, notes) {
+  const sheet = getSheet('Tasks');
+  if (!sheet) return {success: false, error: 'Tasks sheet missing'};
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === taskId) {
+      sheet.getRange(i + 1, 3).setValue(title || '');
+      sheet.getRange(i + 1, 4).setValue(subject || '');
+      sheet.getRange(i + 1, 5).setValue(dueDate || '');
+      sheet.getRange(i + 1, 6).setValue(priority || 'medium');
+      sheet.getRange(i + 1, 8).setValue(notes || '');
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Task not found'};
+}
+
+// ─── PREFS ───────────────────────────────────────────────────
+function getDefaultPrefs() {
+  return {
+    theme: 'indigo',
+    customAccent: null,
+    bgType: 'default',
+    bgValue: '',
+    bgOverlay: 60,
+    textBrightness: 100,
+    clockStyle: 'digital',
+    timerStyle: 'circle',
+    calMode: 'week',
+    tileOrder: ['clock','schedule','tasks','notes','links'],
+    minimizedWidgets: [],
+    hiddenCals: [],
+    weatherLat: null,
+    weatherLon: null,
+    weatherCity: '',
+    weatherView: 'today',
+    spotifyUrl: '',
+    stockSymbols: 'AAPL',
+    tileSizes: {},
+    countdowns: [],
+    widgetBorderColor: '',
+    timeFormat: '12h',
+    tempUnit: 'F',
+    textColorMode: 'light',
+    textColorCustom: ''
+  };
+}
+
+function getMyPrefs() {
+  try {
+    const email = getEmail();
+    if (!email) return {prefs: getDefaultPrefs()};
+    const sheet = getSheet('Prefs');
+    if (!sheet) return {prefs: getDefaultPrefs()};
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === email) {
+        try { return {prefs: JSON.parse(data[i][1])}; }
+        catch(e) { return {prefs: getDefaultPrefs()}; }
+      }
+    }
+    return {prefs: getDefaultPrefs()};
+  } catch(e) {
+    return {prefs: getDefaultPrefs()};
+  }
+}
+
+function saveMyPrefs(prefsJson) {
+  try {
+    const email = getEmail();
+    if (!email) return {success: false};
+    const sheet = getSheet('Prefs');
+    if (!sheet) return {success: false};
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === email) {
+        sheet.getRange(i + 1, 2).setValue(prefsJson);
+        return {success: true};
+      }
+    }
+    sheet.appendRow([email, prefsJson]);
+    return {success: true};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── NOTES ───────────────────────────────────────────────────
+function getMyNotes() {
+  const u = getCurrentUser();
+  if (u.error) return {notes: ''};
+  return getNotesForEmail(u.email);
+}
+
+function getNotesForEmail(email) {
+  const s = getSheet('Notes');
+  if (!s) return {notes: ''};
+  const d = s.getDataRange().getValues();
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0] === email) return {notes: d[i][1] || ''};
+  }
+  return {notes: ''};
+}
+
+function saveMyNotes(notes) {
+  const u = getCurrentUser();
+  if (u.error) return {success: false};
+  const s = getSheet('Notes');
+  const d = s.getDataRange().getValues();
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0] === u.email) {
+      s.getRange(i + 1, 2).setValue(notes);
+      s.getRange(i + 1, 3).setValue(new Date().toISOString());
+      return {success: true};
+    }
+  }
+  s.appendRow([u.email, notes, new Date().toISOString()]);
+  return {success: true};
+}
+
+// ─── LINKS ───────────────────────────────────────────────────
+function getMyLinks() {
+  const u = getCurrentUser();
+  if (u.error) return {links: []};
+  return getLinksForEmail(u.email);
+}
+
+function getLinksForEmail(email) {
+  const s = getSheet('Links');
+  if (!s) return {links: []};
+  const d = s.getDataRange().getValues();
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0] === email) {
+      try { return {links: JSON.parse(d[i][1] || '[]')}; }
+      catch(e) { return {links: []}; }
+    }
+  }
+  return {links: []};
+}
+
+function saveMyLinks(linksJson) {
+  const u = getCurrentUser();
+  if (u.error) return {success: false};
+  const s = getSheet('Links');
+  const d = s.getDataRange().getValues();
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0] === u.email) {
+      s.getRange(i + 1, 2).setValue(linksJson);
+      return {success: true};
+    }
+  }
+  s.appendRow([u.email, linksJson]);
+  return {success: true};
+}
+
+// ─── SCHEDULE ────────────────────────────────────────────────
+function getMySchedule() {
+  const u = getCurrentUser();
+  if (u.error) return {schedule: []};
+  return getScheduleForEmail(u.email);
+}
+
+function getScheduleForEmail(email) {
+  const s = getSheet('Schedule');
+  if (!s) return {schedule: []};
+  const d = s.getDataRange().getValues();
+  const sched = [];
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0] === email) {
+      var extra = {};
+      try { if (d[i][7]) extra = JSON.parse(d[i][7]); } catch(e) {}
+      sched.push({
+        period: d[i][1],
+        subject: d[i][2],
+        teacher: d[i][3],
+        room: d[i][4],
+        startTime: safeTime(d[i][5]),
+        endTime: safeTime(d[i][6]),
+        abDay: !!extra.abDay,
+        subjectB: extra.subjectB || '',
+        teacherB: extra.teacherB || '',
+        roomB: extra.roomB || '',
+        custom: extra.custom || {}
+      });
+    }
+  }
+  return {schedule: sched.sort((a, b) => Number(a.period) - Number(b.period))};
+}
+
+function saveMySchedule(scheduleJson) {
+  const u = getCurrentUser();
+  if (u.error) return {success: false};
+  const sched = JSON.parse(scheduleJson);
+  const s = getSheet('Schedule');
+  const d = s.getDataRange().getValues();
+  for (let i = d.length; i >= 1; i--) {
+    if (d[i - 1][0] === u.email) s.deleteRow(i);
+  }
+  for (const p of sched) {
+    var extra = {
+      abDay: !!p.abDay,
+      subjectB: p.subjectB || '',
+      teacherB: p.teacherB || '',
+      roomB: p.roomB || '',
+      custom: p.custom || {}
+    };
+    s.appendRow([u.email, p.period, p.subject, p.teacher || '', p.room || '', p.startTime || '', p.endTime || '', JSON.stringify(extra)]);
+  }
+  return {success: true};
+}
+
+// ─── HOME PAGE AGGREGATOR ────────────────────────────────────
+// Note: this calls into bell-schedule and embedded-doc functions that haven't
+// been migrated yet — those are still in the Planner project. So during this
+// stage, getHomeData() is one of the few functions that STAYS in the Planner.
+// We'll move it in a later batch when bell schedules and embedded docs are
+// also in the library.
+
+function getStuGroupData() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {students: [], groups: []};
+  return {
+    students: getStudentList(),
+    groups: getGroups()
+  };
+}
+
+// Stub helpers — these still live in the Planner Code.gs for now.
+// Adding minimal versions here that delegate to the planner-side ones via
+// the tasks/users functions we already have.
+function getStudentList() {
+  const s = getSheet('Users');
+  if (!s) return [];
+  const d = s.getDataRange().getValues();
+  const students = [];
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][2] === 'student') students.push({email: d[i][0], name: d[i][1], group: d[i][3] || ''});
+  }
+  return students.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getGroups() {
+  const s = getSheet('Groups');
+  if (!s) return [];
+  const d = s.getDataRange().getValues();
+  const g = [];
+  for (let i = 1; i < d.length; i++) {
+    if (d[i][0]) g.push({
+      name: d[i][0],
+      emails: d[i][1] ? String(d[i][1]).split(',').map(e => e.trim()).filter(Boolean) : []
+    });
+  }
+  return g;
+}
+
+// ─── BELL SCHEDULES ──────────────────────────────────────────
+function getAllBellSchedules() {
+  try {
+    var sheet = getSheet('BellSchedules');
+    if (!sheet) return [];
+    var data = sheet.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      var periods = [];
+      try { periods = JSON.parse(data[i][3] || '[]'); } catch(e) {}
+      out.push({
+        id: String(data[i][0]),
+        name: String(data[i][1] || ''),
+        isDefault: data[i][2] === true || String(data[i][2]).toLowerCase() === 'true',
+        periods: periods,
+        color: String(data[i][4] || '#6366f1'),
+        createdAt: String(data[i][5] || '')
+      });
+    }
+    return out;
+  } catch(e) { return []; }
+}
+
+function getDefaultBellSchedule() {
+  var all = getAllBellSchedules();
+  for (var i = 0; i < all.length; i++) if (all[i].isDefault) return all[i];
+  return all.length ? all[0] : null;
+}
+
+function saveBellSchedule(scheduleJson) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sched;
+  try { sched = JSON.parse(scheduleJson); } catch(e) { return {success: false, error: 'Bad JSON'}; }
+  if (!sched.name) return {success: false, error: 'Name is required'};
+  var sheet = getSheet('BellSchedules');
+  if (!sheet) return {success: false, error: 'Run Repair Missing Sheets first.'};
+  var data = sheet.getDataRange().getValues();
+  var periodsJson = JSON.stringify(sched.periods || []);
+  if (sched.isDefault) {
+    for (var i = 1; i < data.length; i++) {
+      if (data[i][0] && data[i][0] !== sched.id) sheet.getRange(i + 1, 3).setValue(false);
+    }
+  }
+  if (sched.id) {
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(sched.id)) {
+        sheet.getRange(i + 1, 2).setValue(sched.name);
+        sheet.getRange(i + 1, 3).setValue(!!sched.isDefault);
+        sheet.getRange(i + 1, 4).setValue(periodsJson);
+        sheet.getRange(i + 1, 5).setValue(sched.color || '#6366f1');
+        return {success: true, id: sched.id};
+      }
+    }
+  }
+  var newId = generateId();
+  sheet.appendRow([newId, sched.name, !!sched.isDefault, periodsJson, sched.color || '#6366f1', new Date().toISOString()]);
+  return {success: true, id: newId};
+}
+
+function deleteBellSchedule(id) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('BellSchedules');
+  if (!sheet) return {success: false};
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(id)) {
+      sheet.deleteRow(i + 1);
+      var calSheet = getSheet('ScheduleCalendar');
+      if (calSheet) {
+        var cData = calSheet.getDataRange().getValues();
+        for (var j = cData.length - 1; j >= 1; j--) {
+          if (String(cData[j][1]) === String(id)) calSheet.deleteRow(j + 1);
+        }
+      }
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Not found'};
+}
+
+// ─── SCHEDULE CALENDAR ───────────────────────────────────────
+function getScheduleCalendar(startDate, endDate) {
+  try {
+    var sheet = getSheet('ScheduleCalendar');
+    if (!sheet) return [];
+    var data = sheet.getDataRange().getValues();
+    var out = [];
+    var s = startDate ? new Date(startDate + 'T00:00:00') : null;
+    var e = endDate ? new Date(endDate + 'T23:59:59') : null;
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      var d = data[i][0] instanceof Date ? data[i][0] : new Date(data[i][0]);
+      if (isNaN(d)) continue;
+      if (s && d < s) continue;
+      if (e && d > e) continue;
+      out.push({
+        date: Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+        bellScheduleId: String(data[i][1] || ''),
+        dayType: String(data[i][2] || ''),
+        notes: String(data[i][3] || '')
+      });
+    }
+    return out;
+  } catch(e) { return []; }
+}
+
+function setScheduleCalendarEntry(dateStr, bellScheduleId, dayType, notes) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!dateStr) return {success: false, error: 'Date is required'};
+  var sheet = getSheet('ScheduleCalendar');
+  if (!sheet) return {success: false, error: 'Run Repair Missing Sheets first.'};
+  var data = sheet.getDataRange().getValues();
+  var target = new Date(dateStr + 'T12:00:00');
+  var targetKey = Utilities.formatDate(target, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  for (var i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    var d = data[i][0] instanceof Date ? data[i][0] : new Date(data[i][0]);
+    if (isNaN(d)) continue;
+    var k = Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    if (k === targetKey) {
+      if (!bellScheduleId && !dayType) {
+        sheet.deleteRow(i + 1);
+        return {success: true, cleared: true};
+      }
+      sheet.getRange(i + 1, 2).setValue(bellScheduleId || '');
+      sheet.getRange(i + 1, 3).setValue(dayType || '');
+      sheet.getRange(i + 1, 4).setValue(notes || '');
+      return {success: true};
+    }
+  }
+  if (!bellScheduleId && !dayType) return {success: true};
+  sheet.appendRow([target, bellScheduleId || '', dayType || '', notes || '']);
+  return {success: true};
+}
+
+function setScheduleCalendarRange(startDateStr, endDateStr, bellScheduleId, dayType, notes, daysOfWeekJson) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var dows = null;
+  if (daysOfWeekJson) {
+    try { dows = JSON.parse(daysOfWeekJson); } catch(e) {}
+  }
+  var s = new Date(startDateStr + 'T12:00:00');
+  var e = new Date(endDateStr + 'T12:00:00');
+  if (isNaN(s) || isNaN(e) || e < s) return {success: false, error: 'Bad date range'};
+  var count = 0;
+  var d = new Date(s);
+  while (d <= e) {
+    if (!dows || dows.indexOf(d.getDay()) > -1) {
+      var ds = Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      setScheduleCalendarEntry(ds, bellScheduleId, dayType, notes);
+      count++;
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return {success: true, count: count};
+}
+
+function getActiveBellScheduleForDate(dateStr) {
+  var entries = getScheduleCalendar(dateStr, dateStr);
+  var entry = entries.length ? entries[0] : null;
+  var def = getDefaultBellSchedule();
+  var schedule = def;
+  if (entry && entry.bellScheduleId) {
+    var all = getAllBellSchedules();
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].id === entry.bellScheduleId) { schedule = all[i]; break; }
+    }
+  }
+  return {
+    schedule: schedule,
+    dayType: entry ? entry.dayType : '',
+    notes: entry ? entry.notes : '',
+    hasOverride: !!entry
+  };
+}
+
+function getMyScheduleWithBell(dateStr) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {schedule: [], bellSchedules: [], activeBell: null};
+    var ds = dateStr || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    return {
+      schedule: getScheduleForEmail(u.email).schedule,
+      bellSchedules: getAllBellSchedules(),
+      activeBell: getActiveBellScheduleForDate(ds)
+    };
+  } catch(e) {
+    return {schedule: [], bellSchedules: [], activeBell: null, error: e.toString()};
+  }
+}
+
+// ─── EMBEDDED DOCS (just the helper getHomeData needs) ───────
+// The full embedded-docs API moves in Batch 5.
+function getEmbeddedDocsForStudent(email) {
+  var sheet = getSheet('EmbeddedDocs');
+  if (!sheet) return [];
+  var allGroups = getGroups();
+  var myGroupNames = allGroups
+    .filter(function(g) { return g.emails.indexOf(email) > -1; })
+    .map(function(g) { return g.name; });
+  var data = sheet.getDataRange().getValues();
+  var seen = {}, docs = [];
+  for (var i = 1; i < data.length; i++) {
+    var assignedTo = String(data[i][1] || '');
+    var id = String(data[i][0] || '');
+    if (!id) continue;
+    if (assignedTo === 'all' || assignedTo === email || myGroupNames.indexOf(assignedTo) > -1) {
+      if (!seen[id]) {
+        seen[id] = true;
+        docs.push({
+          id: id,
+          title: String(data[i][2] || 'Untitled'),
+          url: String(data[i][3] || ''),
+          docType: String(data[i][4] || 'doc'),
+          assignedTo: assignedTo,
+          assignedBy: String(data[i][5] || '')
+        });
+      }
+    }
+  }
+  return docs;
+}
+
+// ─── HOME PAGE DATA AGGREGATOR ───────────────────────────────
+function getHomeData() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {error: true};
+    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    return {
+      tasks:         getTasksForEmail(u.email),
+      schedule:      getScheduleForEmail(u.email).schedule,
+      notes:         getNotesForEmail(u.email).notes,
+      links:         getLinksForEmail(u.email).links,
+      embeddedDocs:  getEmbeddedDocsForStudent(u.email),
+      bellSchedules: getAllBellSchedules(),
+      activeBell:    getActiveBellScheduleForDate(today)
+    };
+  } catch(e) {
+    return {error: true, message: e.toString()};
+  }
+}
+
+// ─── LUNCH MENU ──────────────────────────────────────────────
+function getLunchMenu() {
+  try {
+    var sheet = getSheet('LunchMenu');
+    if (!sheet) return [];
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return [];
+    var now = new Date();
+    var dow = now.getDay();
+    var mon = new Date(now);
+    mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
+    mon.setHours(0, 0, 0, 0);
+    var sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    sun.setHours(23, 59, 59, 999);
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      var raw = data[i][0];
+      if (!raw) continue;
+      var d = raw instanceof Date ? raw : new Date(raw);
+      if (isNaN(d)) continue;
+      d.setHours(12, 0, 0, 0);
+      if (d >= mon && d <= sun) {
+        rows.push({
+          date: Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+          main:  String(data[i][1] || '').trim(),
+          side1: String(data[i][2] || '').trim(),
+          side2: String(data[i][3] || '').trim(),
+          side3: String(data[i][4] || '').trim(),
+          veg:   String(data[i][5] || '').trim(),
+          notes: String(data[i][6] || '').trim()
+        });
+      }
+    }
+    return rows;
+  } catch(e) {
+    return [];
+  }
+}
+
+function getFullLunchMenu() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  try {
+    var sheet = getSheet('LunchMenu');
+    if (!sheet) return {success: true, rows: []};
+    var data = sheet.getDataRange().getValues();
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      var raw = data[i][0]; if(!raw) continue;
+      var d = raw instanceof Date ? raw : new Date(raw);
+      if(isNaN(d)) continue;
+      rows.push({
+        date:  Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+        main:  String(data[i][1]||'').trim(),
+        side1: String(data[i][2]||'').trim(),
+        side2: String(data[i][3]||'').trim(),
+        side3: String(data[i][4]||'').trim(),
+        veg:   String(data[i][5]||'').trim(),
+        notes: String(data[i][6]||'').trim()
+      });
+    }
+    return {success: true, rows: rows};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── EMBEDDED DOCS ───────────────────────────────────────────
+// getEmbeddedDocsForStudent already moved in Batch 4 — don't re-add it.
+
+function getMyEmbeddedDocs() {
+  var u = getCurrentUser();
+  if (u.error) return [];
+  return getEmbeddedDocsForStudent(u.email);
+}
+
+function getTeacherEmbeddedDocs() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('EmbeddedDocs');
+  if (!sheet) return {success: true, docs: []};
+  var data = sheet.getDataRange().getValues();
+  var docs = [];
+  for (var i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    docs.push({
+      id: String(data[i][0] || ''),
+      assignedTo: String(data[i][1] || ''),
+      title: String(data[i][2] || 'Untitled'),
+      url: String(data[i][3] || ''),
+      docType: String(data[i][4] || 'doc'),
+      assignedBy: String(data[i][5] || ''),
+      assignedAt: String(data[i][6] || '')
+    });
+  }
+  return {success: true, docs: docs};
+}
+
+function createEmbeddedDoc(title, url, docType, targetType, targetValue) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!title || !url) return {success: false, error: 'Title and URL are required.'};
+  var sheet = getSheet('EmbeddedDocs');
+  if (!sheet) return {success: false, error: 'Run Repair Missing Sheets first.'};
+  var assignedTo = (targetType === 'all') ? 'all' : String(targetValue || '');
+  if (!assignedTo) return {success: false, error: 'Select a target.'};
+  sheet.appendRow([
+    generateId(), assignedTo, String(title), String(url),
+    String(docType || 'doc'), u.email, new Date().toISOString()
+  ]);
+  return {success: true};
+}
+
+function deleteEmbeddedDoc(id) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('EmbeddedDocs');
+  if (!sheet) return {success: false};
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(id)) {
+      sheet.deleteRow(i + 1);
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Not found.'};
+}
+
+// ─── ASSIGNED LINKS ──────────────────────────────────────────
+function getMyAssignedLinks() {
+  var u = getCurrentUser();
+  if (u.error) return [];
+  return getAssignedLinksForStudent(u.email);
+}
+
+function getAssignedLinksForStudent(email) {
+  var sheet = getSheet('AssignedLinks');
+  if (!sheet) return [];
+  var allGroups = getGroups();
+  var myGroupNames = allGroups
+    .filter(function(g) { return g.emails.indexOf(email) > -1; })
+    .map(function(g) { return g.name; });
+  var data = sheet.getDataRange().getValues();
+  var seen = {}, links = [];
+  for (var i = 1; i < data.length; i++) {
+    var assignedTo = String(data[i][1] || '');
+    var url = String(data[i][3] || '');
+    if (!url) continue;
+    if (assignedTo === 'all' || assignedTo === email || myGroupNames.indexOf(assignedTo) > -1) {
+      if (!seen[url]) {
+        seen[url] = true;
+        links.push({
+          id: String(data[i][0] || ''),
+          label: String(data[i][2] || ''),
+          url: url,
+          iconUrl: String(data[i][4] || ''),
+          assignedTo: assignedTo,
+          assignedBy: String(data[i][5] || '')
+        });
+      }
+    }
+  }
+  return links;
+}
+
+function getTeacherAssignedLinks() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('AssignedLinks');
+  if (!sheet) return {success: true, links: []};
+  var data = sheet.getDataRange().getValues();
+  var links = [];
+  for (var i = 1; i < data.length; i++) {
+    if (!data[i][3]) continue;
+    links.push({
+      id: String(data[i][0] || ''),
+      assignedTo: String(data[i][1] || ''),
+      label: String(data[i][2] || ''),
+      url: String(data[i][3] || ''),
+      iconUrl: String(data[i][4] || ''),
+      assignedBy: String(data[i][5] || ''),
+      assignedAt: String(data[i][6] || '')
+    });
+  }
+  return {success: true, links: links};
+}
+
+function assignLinkToTarget(targetType, targetValue, label, url, iconUrl) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!url || !label) return {success: false, error: 'Label and URL required.'};
+  var sheet = getSheet('AssignedLinks');
+  if (!sheet) return {success: false, error: 'Run Repair Missing Sheets first.'};
+  var assignedTo = (targetType === 'all') ? 'all' : String(targetValue || '');
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][1]) === assignedTo && String(data[i][3]) === String(url))
+      return {success: false, error: 'Already assigned to that target.'};
+  }
+  sheet.appendRow([
+    generateId(), assignedTo, String(label), String(url),
+    String(iconUrl || ''), u.email, new Date().toISOString()
+  ]);
+  return {success: true};
+}
+
+function removeAssignedLink(linkId) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('AssignedLinks');
+  if (!sheet) return {success: false};
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(linkId)) {
+      sheet.deleteRow(i + 1);
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Not found.'};
+}
+
+// ════════════════════════════════════════════════════════════
+// ROW REWARDS
+// ════════════════════════════════════════════════════════════
+
+// ─── HELPERS (private) ───────────────────────────────────────
+function _getRowBalance(email) {
+  var sheet = getSheet('RowAccounts');
+  if (!sheet) return 0;
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === email) return Number(data[i][1]) || 0;
+  }
+  return 0;
+}
+
+function _setRowBalance(email, newBal) {
+  var sheet = getSheet('RowAccounts');
+  if (!sheet) return false;
+  var data = sheet.getDataRange().getValues();
+  var ts = new Date().toISOString();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === email) {
+      sheet.getRange(i+1, 2).setValue(newBal);
+      sheet.getRange(i+1, 3).setValue(ts);
+      return true;
+    }
+  }
+  sheet.appendRow([email, newBal, ts]);
+  return true;
+}
+
+// ─── STUDENT ─────────────────────────────────────────────────
+function getMyRowBalance() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, balance: 0};
+    return {success: true, balance: _getRowBalance(u.email)};
+  } catch(e) {
+    return {success: false, balance: 0, error: e.toString()};
+  }
+}
+
+function getMyRowHistory() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, history: []};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: true, history: []};
+    var data = sheet.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][1]) === u.email) {
+        out.push({
+          id: String(data[i][0] || ''),
+          studentEmail: String(data[i][1] || ''),
+          teacherEmail: String(data[i][2] || ''),
+          type: String(data[i][3] || ''),
+          amount: Number(data[i][4]) || 0,
+          category: String(data[i][5] || ''),
+          description: String(data[i][6] || ''),
+          status: String(data[i][7] || ''),
+          createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : '',
+          resolvedAt: data[i][9] ? new Date(data[i][9]).toISOString() : '',
+          comment: String(data[i][10] || '')
+        });
+      }
+    }
+    out.sort(function(a, b) {
+      var da = new Date(a.createdAt || 0).getTime();
+      var db = new Date(b.createdAt || 0).getTime();
+      return db - da;
+    });
+    return {success: true, history: out};
+  } catch(e) {
+    return {success: false, history: [], error: e.toString()};
+  }
+}
+
+function requestRow(teacherEmail, category, description) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, error: 'Could not identify you. Refresh and try again.'};
+    if (u.role !== 'student') return {success: false, error: 'Switch to View as Student mode to test requesting ROWs.'};
+    if (!teacherEmail || !category || !description) {
+      return {success: false, error: 'Pick a teacher, category, and write a short description.'};
+    }
+    if (String(description).trim().length < 3) return {success: false, error: 'Description is too short.'};
+    if (String(description).length > 500) return {success: false, error: 'Description is too long (max 500 chars).'};
+
+    var users = getSheet('Users');
+    if (!users) return {success: false, error: 'Users sheet missing.'};
+    var uData = users.getDataRange().getValues();
+    var validTeacher = false;
+    for (var i = 1; i < uData.length; i++) {
+      if (String(uData[i][0]) === teacherEmail && String(uData[i][2]) === 'teacher') {
+        validTeacher = true; break;
+      }
+    }
+    if (!validTeacher) return {success: false, error: 'That teacher was not found.'};
+
+    var txSheet = getSheet('RowTransactions');
+    if (!txSheet) return {success: false, error: 'RowTransactions sheet missing — run Repair Missing Sheets.'};
+
+    var id = generateId();
+    txSheet.appendRow([
+      id, u.email, teacherEmail, 'request',
+      1,
+      String(category), String(description),
+      'pending', new Date().toISOString(), '', ''
+    ]);
+    return {success: true, id: id};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function cancelMyRowRequest(requestId) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: false};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(requestId)
+          && String(data[i][1]) === u.email
+          && String(data[i][7]) === 'pending') {
+        sheet.deleteRow(i + 1);
+        return {success: true};
+      }
+    }
+    return {success: false, error: 'Request not found or already resolved.'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function getTeacherListForRow() {
+  try {
+    var sheet = getSheet('Users');
+    if (!sheet) return [];
+    var data = sheet.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][2]) === 'teacher') {
+        out.push({email: String(data[i][0]), name: String(data[i][1])});
+      }
+    }
+    return out.sort(function(a, b) { return a.name.localeCompare(b.name); });
+  } catch(e) { return []; }
+}
+
+// ─── TEACHER ─────────────────────────────────────────────────
+function getPendingRowRequestsForTeacher() {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', requests: []};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: true, requests: []};
+    var data = sheet.getDataRange().getValues();
+
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) {
+        nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+      }
+    }
+
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][2]) === u.email
+          && String(data[i][3]) === 'request'
+          && String(data[i][7]) === 'pending') {
+        out.push({
+          id: String(data[i][0] || ''),
+          studentEmail: String(data[i][1] || ''),
+          studentName: nameMap[String(data[i][1])] || String(data[i][1]),
+          category: String(data[i][5] || ''),
+          description: String(data[i][6] || ''),
+          createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : ''
+        });
+      }
+    }
+    out.sort(function(a, b) {
+      var da = new Date(a.createdAt || 0).getTime();
+      var db = new Date(b.createdAt || 0).getTime();
+      return da - db;
+    });
+    return {success: true, requests: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), requests: []};
+  }
+}
+
+function approveRowRequest(requestId, amount, comment) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var amt = parseInt(amount, 10);
+    if (isNaN(amt) || amt < 1 || amt > 10) {
+      return {success: false, error: 'Amount must be 1–10.'};
+    }
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: false};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(requestId)
+          && String(data[i][2]) === u.email
+          && String(data[i][7]) === 'pending') {
+        var studentEmail = String(data[i][1]);
+        sheet.getRange(i + 1, 5).setValue(amt);
+        sheet.getRange(i + 1, 8).setValue('approved');
+        sheet.getRange(i + 1, 10).setValue(new Date().toISOString());
+        sheet.getRange(i + 1, 11).setValue(String(comment || ''));
+        var newBal = _getRowBalance(studentEmail) + amt;
+        _setRowBalance(studentEmail, newBal);
+        return {success: true, newBalance: newBal};
+      }
+    }
+    return {success: false, error: 'Request not found or already resolved.'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function denyRowRequest(requestId, comment) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: false};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(requestId)
+          && String(data[i][2]) === u.email
+          && String(data[i][7]) === 'pending') {
+        sheet.getRange(i + 1, 8).setValue('denied');
+        sheet.getRange(i + 1, 10).setValue(new Date().toISOString());
+        sheet.getRange(i + 1, 11).setValue(String(comment || ''));
+        return {success: true};
+      }
+    }
+    return {success: false, error: 'Request not found or already resolved.'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function getMyApprovalHistory() {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', transactions: []};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: true, transactions: []};
+    var data = sheet.getDataRange().getValues();
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) {
+        nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+      }
+    }
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][2]) !== u.email) continue;
+      if (String(data[i][3]) !== 'request') continue;
+      var studentEmail = String(data[i][1] || '');
+      out.push({
+        id: String(data[i][0] || ''),
+        studentEmail: studentEmail,
+        studentName: nameMap[studentEmail] || studentEmail,
+        amount: Number(data[i][4]) || 0,
+        category: String(data[i][5] || ''),
+        description: String(data[i][6] || ''),
+        status: String(data[i][7] || ''),
+        createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : '',
+        resolvedAt: data[i][9] ? new Date(data[i][9]).toISOString() : '',
+        comment: String(data[i][10] || '')
+      });
+    }
+    out.sort(function(a, b) {
+      var da = new Date(a.resolvedAt || a.createdAt || 0).getTime();
+      var db = new Date(b.resolvedAt || b.createdAt || 0).getTime();
+      return db - da;
+    });
+    return {success: true, transactions: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), transactions: []};
+  }
+}
+
+// ─── ADMIN ───────────────────────────────────────────────────
+function adminGetAllRowAccounts() {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', accounts: []};
+    var users = getSheet('Users');
+    var accSheet = getSheet('RowAccounts');
+    if (!users) return {success: false, accounts: []};
+    var balMap = {};
+    if (accSheet) {
+      var aData = accSheet.getDataRange().getValues();
+      for (var i = 1; i < aData.length; i++) {
+        balMap[String(aData[i][0])] = Number(aData[i][1]) || 0;
+      }
+    }
+    var data = users.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      var role = String(data[i][2]);
+      if (role === 'student' || role === 'teacher') {
+        out.push({
+          email: String(data[i][0]),
+          name: String(data[i][1]),
+          role: role,
+          balance: balMap[String(data[i][0])] || 0
+        });
+      }
+    }
+    out.sort(function(a, b) {
+      if (a.role !== b.role) return a.role === 'student' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return {success: true, accounts: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), accounts: []};
+  }
+}
+
+function adminAdjustRowBalance(studentEmail, delta, reason) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var d = parseInt(delta, 10);
+    if (isNaN(d) || d === 0) return {success: false, error: 'Adjustment must be a non-zero number.'};
+    if (Math.abs(d) > 100) return {success: false, error: 'Adjustment too large (max ±100).'};
+    if (!studentEmail) return {success: false, error: 'No account selected.'};
+
+    var users = getSheet('Users');
+    var found = false;
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var i = 1; i < uData.length; i++) {
+        if (String(uData[i][0]) === studentEmail) { found = true; break; }
+      }
+    }
+    if (!found) return {success: false, error: 'Account not found.'};
+
+    var cur = _getRowBalance(studentEmail);
+    var newBal = Math.max(0, cur + d);
+    _setRowBalance(studentEmail, newBal);
+
+    var txSheet = getSheet('RowTransactions');
+    if (txSheet) {
+      txSheet.appendRow([
+        generateId(), studentEmail, u.email,
+        d > 0 ? 'admin_credit' : 'admin_debit',
+        Math.abs(d),
+        'Manual Adjustment',
+        String(reason || ''),
+        'completed',
+        new Date().toISOString(),
+        new Date().toISOString(),
+        ''
+      ]);
+    }
+    return {success: true, newBalance: newBal};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function adminGetAllRowTransactions(limit) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', transactions: []};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: true, transactions: []};
+    var data = sheet.getDataRange().getValues();
+
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) {
+        nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+      }
+    }
+
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      out.push({
+        id: String(data[i][0] || ''),
+        studentEmail: String(data[i][1] || ''),
+        studentName: nameMap[String(data[i][1])] || String(data[i][1]),
+        teacherEmail: String(data[i][2] || ''),
+        teacherName: nameMap[String(data[i][2])] || String(data[i][2]),
+        type: String(data[i][3] || ''),
+        amount: Number(data[i][4]) || 0,
+        category: String(data[i][5] || ''),
+        description: String(data[i][6] || ''),
+        status: String(data[i][7] || ''),
+        createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : '',
+        resolvedAt: data[i][9] ? new Date(data[i][9]).toISOString() : '',
+        comment: String(data[i][10] || '')
+      });
+    }
+    out.sort(function(a, b) {
+      var da = new Date(a.createdAt || 0).getTime();
+      var db = new Date(b.createdAt || 0).getTime();
+      return db - da;
+    });
+    var lim = parseInt(limit, 10);
+    if (!isNaN(lim) && lim > 0) out = out.slice(0, lim);
+    return {success: true, transactions: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), transactions: []};
+  }
+}
+
+function adminSpendRows(studentEmail, amount, item) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var amt = parseInt(amount, 10);
+    if (isNaN(amt) || amt < 1) return {success: false, error: 'Amount must be at least 1.'};
+    var cur = _getRowBalance(studentEmail);
+    if (amt > cur) return {success: false, error: 'Not enough ROWs (balance is ' + cur + ').'};
+    var newBal = cur - amt;
+    _setRowBalance(studentEmail, newBal);
+    var txSheet = getSheet('RowTransactions');
+    if (txSheet) {
+      txSheet.appendRow([
+        generateId(), studentEmail, u.email, 'spend',
+        amt, 'Hawk Shop', String(item || ''), 'completed',
+        new Date().toISOString(), new Date().toISOString(), ''
+      ]);
+    }
+    return {success: true, newBalance: newBal};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// TEACHER TOOLS
+// ════════════════════════════════════════════════════════════
+
+function pushAssignment(targetType, targetValue, title, subject, dueDate, priority, notes) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!title) return {success: false, error: 'Title required'};
+  var targets = [];
+  if (targetType === 'all') {
+    targets = getStudentList().map(function(s) { return s.email; });
+  } else if (targetType === 'group') {
+    var groups = getGroups();
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].name === targetValue) { targets = groups[i].emails; break; }
+    }
+  } else if (targetType === 'individual') {
+    if (targetValue) targets = [targetValue];
+  }
+  if (!targets.length) return {success: false, error: 'No targets'};
+  var count = 0;
+  for (var i = 0; i < targets.length; i++) {
+    _addTask(targets[i], title, subject, dueDate, priority, notes, u.email);
+    count++;
+  }
+  return {success: true, count: count};
+}
+
+function getStudentPlannerData(email) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {error: 'Not authorized'};
+  if (!email) return {error: 'No student email'};
+  return {
+    tasks: getTasksForEmail(email),
+    schedule: getScheduleForEmail(email).schedule,
+    notes: getNotesForEmail(email).notes,
+    links: getLinksForEmail(email).links
+  };
+}
+
+function teacherAddTaskToStudent(studentEmail, title, subject, dueDate, priority, notes) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!studentEmail || !title) return {success: false, error: 'Missing fields'};
+  return _addTask(studentEmail, title, subject, dueDate, priority, notes, u.email);
+}
+
+function teacherDeleteTask(taskId) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  return setTaskStatus(taskId, 'deleted');
+}
+
+function saveGroup(name, emailsArr) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!name) return {success: false, error: 'Group name required'};
+  var sheet = getSheet('Groups');
+  if (!sheet) return {success: false, error: 'Groups sheet missing'};
+  var emails = (emailsArr || []).join(',');
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === name) {
+      sheet.getRange(i + 1, 2).setValue(emails);
+      return {success: true};
+    }
+  }
+  sheet.appendRow([name, emails, new Date().toISOString()]);
+  return {success: true};
+}
+
+function deleteGroup(name) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('Groups');
+  if (!sheet) return {success: false};
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === name) {
+      sheet.deleteRow(i + 1);
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Not found'};
+}
+
+// ════════════════════════════════════════════════════════════
+// ADMIN TOOLS
+// ════════════════════════════════════════════════════════════
+
+function getDataStats() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var sheets = ss.getSheets();
+    var out = [];
+    for (var i = 0; i < sheets.length; i++) {
+      var s = sheets[i];
+      out.push({name: s.getName(), rows: Math.max(0, s.getLastRow() - 1)});
+    }
+    return {success: true, sheets: out};
+  } catch(e) {
+    return {error: e.toString()};
+  }
+}
+
+function runDataCleanup(target) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var removed = 0;
+    if (target === 'tasks_completed') {
+      var sheet = ss.getSheetByName('Tasks');
+      if (sheet) {
+        var data = sheet.getDataRange().getValues();
+        for (var i = data.length - 1; i >= 1; i--) {
+          if (data[i][6] === 'completed' || data[i][6] === 'deleted') {
+            sheet.deleteRow(i + 1); removed++;
+          }
+        }
+      }
+    } else if (target === 'tasks_deleted') {
+      var sheet = ss.getSheetByName('Tasks');
+      if (sheet) {
+        var data = sheet.getDataRange().getValues();
+        for (var i = data.length - 1; i >= 1; i--) {
+          if (data[i][6] === 'deleted') {
+            sheet.deleteRow(i + 1); removed++;
+          }
+        }
+      }
+    }
+    return {success: true, removed: removed};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function importLunchData(rows) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!Array.isArray(rows) || !rows.length) return {success: false, error: 'No rows'};
+  var sheet = getSheet('LunchMenu');
+  if (!sheet) return {success: false, error: 'LunchMenu sheet missing'};
+  var added = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r.date) continue;
+    sheet.appendRow([
+      new Date(r.date + 'T12:00:00'),
+      r.main || '', r.side1 || '', r.side2 || '', r.side3 || '',
+      r.veg || '', r.notes || ''
+    ]);
+    added++;
+  }
+  return {success: true, added: added};
+}
+
+function repairSheetsFromApp() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var defs = allSheetDefs();
+    var created = 0;
+    for (var name in defs) {
+      var sheet = ss.getSheetByName(name);
+      if (!sheet) {
+        sheet = ss.insertSheet(name);
+        sheet.appendRow(defs[name]);
+        sheet.setFrozenRows(1);
+        created++;
+      } else if (sheet.getLastRow() === 0) {
+        sheet.appendRow(defs[name]);
+        sheet.setFrozenRows(1);
+      }
+    }
+    return {success: true, created: created};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function graduateStudents(emails) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!Array.isArray(emails) || !emails.length) return {success: false, error: 'No emails'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var emailSet = {};
+    emails.forEach(function(e) { emailSet[String(e).toLowerCase()] = true; });
+    var purgeFromSheet = function(sheetName, emailColumnIndex) {
+      var sheet = ss.getSheetByName(sheetName);
+      if (!sheet) return 0;
+      var data = sheet.getDataRange().getValues();
+      var removed = 0;
+      for (var i = data.length - 1; i >= 1; i--) {
+        if (emailSet[String(data[i][emailColumnIndex] || '').toLowerCase()]) {
+          sheet.deleteRow(i + 1); removed++;
+        }
+      }
+      return removed;
+    };
+    var report = {};
+    report.users = purgeFromSheet('Users', 0);
+    report.tasks = purgeFromSheet('Tasks', 1);
+    report.schedule = purgeFromSheet('Schedule', 0);
+    report.notes = purgeFromSheet('Notes', 0);
+    report.links = purgeFromSheet('Links', 0);
+    report.prefs = purgeFromSheet('Prefs', 0);
+    report.rowAccounts = purgeFromSheet('RowAccounts', 0);
+    report.rowTransactions = purgeFromSheet('RowTransactions', 1);
+    return {success: true, report: report};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// allSheetDefs is needed by repairSheetsFromApp — keep it in the library
+function allSheetDefs() {
+  return {
+    'Config':     ['Key','Value'],
+    'Users':      ['Email','Name','Role','Group','RegisteredAt'],
+    'Tasks':      ['ID','AssignedTo','Title','Subject','DueDate','Priority','Status','Notes','AssignedBy','CreatedAt'],
+    'Groups':     ['GroupName','Emails','CreatedAt'],
+    'Schedule':   ['Email','Period','Subject','Teacher','Room','StartTime','EndTime','ExtraJSON'],
+    'Notes':      ['Email','Content','UpdatedAt'],
+    'Links':      ['Email','LinksJSON'],
+    'Prefs':      ['Email','PrefsJSON'],
+    'AssignedLinks': ['ID','AssignedTo','Label','URL','IconUrl','AssignedBy','AssignedAt'],
+    'LunchMenu':  ['Date','Main','Side1','Side2','Side3','Vegetarian','Notes'],
+    'EmbeddedDocs':['ID','AssignedTo','Title','URL','DocType','AssignedBy','AssignedAt'],
+    'RowAccounts':['Email','Balance','UpdatedAt'],
+    'RowTransactions':['ID','StudentEmail','TeacherEmail','Type','Amount','Category','Description','Status','CreatedAt','ResolvedAt','Comment'],
+    'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
+    'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
+    'BellScheduleConfig':['Key','Value']
+  };
+}
+

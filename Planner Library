@@ -4,7 +4,7 @@
 // ════════════════════════════════════════════════════════════
 
 // Library version marker — bump this each time you publish a new version
-const LIB_VERSION = '0.9.0-batch8-admin';
+const LIB_VERSION = '1.0.0-stage4-cleanup';
 
 // ─── CONFIG ──────────────────────────────────────────────────
 // The library reads/writes from a specific spreadsheet.
@@ -1640,7 +1640,282 @@ function allSheetDefs() {
     'RowTransactions':['ID','StudentEmail','TeacherEmail','Type','Amount','Category','Description','Status','CreatedAt','ResolvedAt','Comment'],
     'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
     'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
-    'BellScheduleConfig':['Key','Value']
+    'BellScheduleConfig':['Key','Value'],
+    'EventStatus':['Email','EventID','Completed','UpdatedAt']
   };
+}
+
+// ════════════════════════════════════════════════════════════
+// CALENDAR — Custom views (month/week/agenda)
+// Requires Calendar advanced service + Calendar OAuth scope
+// ════════════════════════════════════════════════════════════
+
+// Returns the user's calendar list with name + color
+function getMyCalendarsList() {
+  try {
+    if (typeof Calendar === 'undefined' || !Calendar.CalendarList) {
+      var cals = CalendarApp.getAllCalendars().map(function(c) {
+        return {
+          id: c.getId(),
+          name: c.getName(),
+          color: c.getColor() || '#6366f1',
+          primary: c.getId() === getEmail()
+        };
+      });
+      cals.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+      return cals;
+    }
+    var list = Calendar.CalendarList.list({minAccessRole: 'reader', maxResults: 50});
+    var out = [];
+    if (list && list.items) {
+      list.items.forEach(function(c) {
+        out.push({
+          id: c.id,
+          name: c.summary || c.id,
+          color: c.backgroundColor || '#6366f1',
+          primary: !!c.primary
+        });
+      });
+    }
+    out.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+    return out;
+  } catch(e) {
+    var email = getEmail();
+    return [{id: email, name: 'My Calendar', color: '#6366f1', primary: true}];
+  }
+}
+
+// Fetch events between two dates from all visible calendars
+function getCalendarEvents(startDateStr, endDateStr, hiddenCalIdsJson) {
+  try {
+    if (typeof Calendar === 'undefined' || !Calendar.Events) {
+      return {success: false, error: 'Calendar service not enabled. In the Apps Script editor, click + next to Services, add Google Calendar API.', events: []};
+    }
+    var hidden = [];
+    if (hiddenCalIdsJson) {
+      try { hidden = JSON.parse(hiddenCalIdsJson) || []; } catch(e) {}
+    }
+    var cals = getMyCalendarsList();
+    var events = [];
+    cals.forEach(function(cal) {
+      if (hidden.indexOf(cal.id) > -1) return;
+      try {
+        var resp = Calendar.Events.list(cal.id, {
+          timeMin: new Date(startDateStr).toISOString(),
+          timeMax: new Date(endDateStr).toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime',
+          maxResults: 500
+        });
+        (resp.items || []).forEach(function(ev) {
+          if (!ev.start) return;
+          var start = ev.start.dateTime || ev.start.date;
+          var end = ev.end ? (ev.end.dateTime || ev.end.date) : start;
+          events.push({
+            id: ev.id,
+            calendarId: cal.id,
+            calendarName: cal.name,
+            calendarColor: cal.color,
+            title: ev.summary || '(No title)',
+            description: ev.description || '',
+            location: ev.location || '',
+            start: start,
+            end: end,
+            allDay: !ev.start.dateTime,
+            recurring: !!ev.recurringEventId,
+            htmlLink: ev.htmlLink || ''
+          });
+        });
+      } catch(err) {
+        // skip calendars we can't list
+      }
+    });
+    return {success: true, events: events};
+  } catch(e) {
+    return {success: false, error: e.toString(), events: []};
+  }
+}
+
+// Create a new single-day event
+function createCalendarEvent(payloadJson) {
+  try {
+    if (typeof Calendar === 'undefined' || !Calendar.Events) {
+      return {success: false, error: 'Calendar service not enabled.'};
+    }
+    var p = JSON.parse(payloadJson);
+    if (!p.title) return {success: false, error: 'Title required'};
+    if (!p.date) return {success: false, error: 'Date required'};
+    if (!p.startTime || !p.endTime) return {success: false, error: 'Start and end time required'};
+    var calId = p.calendarId || 'primary';
+    var tz = Session.getScriptTimeZone();
+    var event = {
+      summary: String(p.title),
+      description: String(p.description || ''),
+      location: String(p.location || ''),
+      start: { dateTime: p.date + 'T' + p.startTime + ':00', timeZone: tz },
+      end:   { dateTime: p.date + 'T' + p.endTime   + ':00', timeZone: tz }
+    };
+    var created = Calendar.Events.insert(event, calId);
+    return {success: true, id: created.id, htmlLink: created.htmlLink || ''};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Update an existing event
+function updateCalendarEvent(payloadJson) {
+  try {
+    if (typeof Calendar === 'undefined' || !Calendar.Events) {
+      return {success: false, error: 'Calendar service not enabled.'};
+    }
+    var p = JSON.parse(payloadJson);
+    if (!p.eventId || !p.calendarId) return {success: false, error: 'Missing event ID'};
+    var tz = Session.getScriptTimeZone();
+    var updates = {
+      summary: String(p.title || ''),
+      description: String(p.description || ''),
+      location: String(p.location || ''),
+      start: { dateTime: p.date + 'T' + p.startTime + ':00', timeZone: tz },
+      end:   { dateTime: p.date + 'T' + p.endTime   + ':00', timeZone: tz }
+    };
+    var result = Calendar.Events.patch(updates, p.calendarId, p.eventId);
+    return {success: true, id: result.id};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Delete an event (also clears its done status)
+function deleteCalendarEvent(calendarId, eventId) {
+  try {
+    if (typeof Calendar === 'undefined' || !Calendar.Events) {
+      return {success: false, error: 'Calendar service not enabled.'};
+    }
+    if (!calendarId || !eventId) return {success: false, error: 'Missing IDs'};
+    Calendar.Events.remove(calendarId, eventId);
+    try {
+      var u = getCurrentUser();
+      if (!u.error) {
+        var sheet = getSheet('EventStatus');
+        if (sheet) {
+          var data = sheet.getDataRange().getValues();
+          for (var i = data.length - 1; i >= 1; i--) {
+            if (String(data[i][0]) === u.email && String(data[i][1]) === eventId) {
+              sheet.deleteRow(i + 1);
+            }
+          }
+        }
+      }
+    } catch(e) {}
+    return {success: true};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Read all done states for the current user
+function getMyEventStatuses() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {};
+    var sheet = getSheet('EventStatus');
+    if (!sheet) return {};
+    var data = sheet.getDataRange().getValues();
+    var out = {};
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === u.email) {
+        var v = data[i][2];
+        out[String(data[i][1])] = (v === true || v === 'true' || v === 'TRUE');
+      }
+    }
+    return out;
+  } catch(e) {
+    return {};
+  }
+}
+
+// Toggle done state for one event
+function setEventStatus(eventId, completed) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, error: 'Not authenticated'};
+    if (!eventId) return {success: false, error: 'Missing event ID'};
+    var sheet = getSheet('EventStatus');
+    if (!sheet) return {success: false, error: 'EventStatus sheet missing — run Repair Missing Sheets'};
+    var data = sheet.getDataRange().getValues();
+    var done = !!completed;
+    var ts = new Date().toISOString();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === u.email && String(data[i][1]) === eventId) {
+        if (!done) {
+          sheet.deleteRow(i + 1);
+          return {success: true, completed: false};
+        }
+        sheet.getRange(i + 1, 3).setValue(true);
+        sheet.getRange(i + 1, 4).setValue(ts);
+        return {success: true, completed: true};
+      }
+    }
+    if (done) {
+      sheet.appendRow([u.email, eventId, true, ts]);
+    }
+    return {success: true, completed: done};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Combined call — calendars + events + statuses in one round-trip
+function getCalendarPageData(startDateStr, endDateStr, hiddenCalIdsJson) {
+  try {
+    var evResult = getCalendarEvents(startDateStr, endDateStr, hiddenCalIdsJson);
+    return {
+      calendars: getMyCalendarsList(),
+      events: evResult.events || [],
+      eventsError: evResult.success ? null : (evResult.error || null),
+      statuses: getMyEventStatuses()
+    };
+  } catch(e) {
+    return {error: e.toString(), calendars: [], events: [], statuses: {}};
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// CALENDAR LIST
+// ════════════════════════════════════════════════════════════
+
+function getMyCalendars() {
+  try {
+    var cals = [];
+    if (typeof Calendar !== 'undefined' && Calendar.CalendarList) {
+      var list = Calendar.CalendarList.list({minAccessRole: 'reader', maxResults: 50});
+      if (list && list.items) {
+        list.items.forEach(function(c) {
+          cals.push({
+            id: c.id,
+            name: c.summary || c.id,
+            color: c.backgroundColor || '#6366f1',
+            primary: !!c.primary
+          });
+        });
+        cals.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+        return cals;
+      }
+    }
+    var calApp = CalendarApp.getAllCalendars();
+    calApp.forEach(function(c) {
+      cals.push({
+        id: c.getId(),
+        name: c.getName(),
+        color: c.getColor() || '#6366f1',
+        primary: c.getId() === getEmail()
+      });
+    });
+    cals.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+    return cals;
+  } catch(e) {
+    var email = getEmail();
+    return [{id: email, name: 'My Calendar', color: '#6366f1', primary: true}];
+  }
 }
 

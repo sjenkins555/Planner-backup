@@ -1368,6 +1368,63 @@ body.view-as-student .topbar{padding-top:0}
 .row-admin-role.teacher{background:rgba(168,85,247,.12);color:#c084fc;border:1px solid rgba(168,85,247,.3)}
 @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
 
+/* ── SOARING CREST WIDGET LOADER ─────────────────────────── */
+@keyframes soar-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-8%); }
+}
+@keyframes soar-halo {
+  0%, 100% { opacity: .35; transform: scale(.92); }
+  50%      { opacity: .7;  transform: scale(1.08); }
+}
+.widget-loader-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 14, 26, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  border-radius: 16px;
+  pointer-events: all;
+  animation: fadeUp .15s ease-out;
+}
+body[data-ui-style="zen"] .widget-loader-overlay,
+body[data-ui-style="notebook"] .widget-loader-overlay,
+body[data-ui-style="sunrise"] .widget-loader-overlay {
+  background: rgba(255, 255, 255, .55);
+}
+.soaring-spinner {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  display: inline-block;
+}
+.soaring-spinner.sm { width: 56px; height: 56px; }
+.soaring-spinner.lg { width: 96px; height: 96px; }
+.soaring-spinner .halo {
+  position: absolute;
+  inset: -10%;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    rgba(244, 180, 26, 0.55) 0%,
+    rgba(244, 180, 26, 0) 65%);
+  animation: soar-halo 1.8s ease-in-out infinite;
+}
+.soaring-spinner .crest {
+  position: absolute;
+  inset: 0;
+  background: url('https://raw.githubusercontent.com/sjenkins555/cedar-hollow-assets/main/CH%20Hawks%20Crest.png') center/contain no-repeat;
+  animation: soar-bob 1.8s ease-in-out infinite;
+  filter: drop-shadow(0 4px 8px rgba(21, 34, 62, 0.25));
+}
+@media (prefers-reduced-motion: reduce) {
+  .soaring-spinner .halo,
+  .soaring-spinner .crest { animation: none; }
+}
+
 </style>
 </head>
 <body>
@@ -1921,7 +1978,13 @@ function _checkAutoRefresh(){
   _autoRefreshTargets.forEach(function(t){
     var elapsedMin = (now - t.lastRun) / 60000;
     if (elapsedMin >= t.minMinutes){
-      try { t.fn(); } catch(e) { console.warn('Auto-refresh failed for '+t.id, e); }
+      try {
+        if (t.id) showWidgetLoader(t.id, 'sm');
+        t.fn();
+      } catch(e) {
+        console.warn('Auto-refresh failed for '+t.id, e);
+        if (t.id) hideWidgetLoader(t.id);
+      }
       t.lastRun = now;
     }
   });
@@ -1935,24 +1998,37 @@ window.addEventListener('focus', _checkAutoRefresh);
 // BOOT
 window.onload=function(){
   tickClock();setInterval(tickClock,1000);
-  checkLibraryConnection();
   var hint=setTimeout(function(){var h=document.getElementById('load-hint');if(h)h.style.display='block';},6000);
   var fail=setTimeout(function(){showErr('Request timed out (22s).\n\nFix: Deploy > Manage Deployments > Edit\n> Execute as: Me > New Version > Deploy.');},22000);
-  function safeBootWithPrefs(r){
-    try{prefs=mergePrefs((r&&r.prefs)?r.prefs:{});}catch(e){prefs=Object.assign({},DEF_PREFS);}
-    try{applyAllPrefs();}catch(e){console.error('applyAllPrefs:',e);}
-    try{bootApp();}catch(e){showErr('App failed to start: '+e.message+'\n\nPlease refresh or contact your teacher.');}
-  }
   google.script.run
-    .withSuccessHandler(function(u){
+    .withSuccessHandler(function(r){
       clearTimeout(hint);clearTimeout(fail);
-      if(!u||u.error){showErr(u?u.message:'Unknown error loading user.');return;}
-      CU=u;
-      try{google.script.run.withSuccessHandler(function(r){safeBootWithPrefs(r);}).withFailureHandler(function(){safeBootWithPrefs(null);}).getMyPrefs();}
-      catch(e){safeBootWithPrefs(null);}
+      if(!r||r.error||(r.user&&r.user.error)){
+        showErr((r&&r.message)||(r&&r.user&&r.user.message)||'Unknown error loading planner.');
+        return;
+      }
+      CU=r.user;
+      try{prefs=mergePrefs(r.prefs||{});}catch(e){prefs=Object.assign({},DEF_PREFS);}
+      // Pre-populate everything so loadHomeData() doesn't refetch
+      myTasks=r.tasks||[];
+      mySchedule=r.schedule||[];
+      myNotes=r.notes||'';
+      myNotesData=parseNotesData(myNotes);
+      myLinks=r.links||[];
+      myEmbeddedDocs=r.embeddedDocs||[];
+      bellSchedules=r.bellSchedules||[];
+      activeBell=r.activeBell||null;
+      homeDataLoaded=true;
+      // Stash assigned links so loadMyAssignedLinks can use them without refetching
+      window._preloadedAssignedLinks=r.assignedLinks;
+      try{applyAllPrefs();}catch(e){console.error('applyAllPrefs:',e);}
+      try{bootApp();}catch(e){showErr('App failed to start: '+e.message);}
     })
-    .withFailureHandler(function(e){clearTimeout(hint);clearTimeout(fail);showErr('Script error: '+e.message+'\n\nAuthorize the script from the Apps Script editor first.');})
-    .getCurrentUser();
+    .withFailureHandler(function(e){
+      clearTimeout(hint);clearTimeout(fail);
+      showErr('Script error: '+e.message+'\n\nAuthorize the script from the Apps Script editor first.');
+    })
+    .getBootData();
 };
 function showErr(msg){document.getElementById('ls-wrap').style.display='none';document.getElementById('load-err').style.display='block';document.getElementById('load-err-msg').textContent=msg;}
 
@@ -2011,6 +2087,28 @@ function bootApp(){
   try{buildBgPresets();}catch(e){}
   loadMyAssignedLinks();
   switchTab(isT?'my-home':'home');
+
+  // Pre-warm the calendar cache so the Calendar tab opens instantly.
+  // Wait 1.5s so this doesn't compete with the initial home page render.
+  setTimeout(function(){
+    try {
+      if (!calCursor) calCursor = new Date();
+      var range = _calRange();
+      google.script.run
+        .withSuccessHandler(function(r){
+          if (r && r.events) {
+            _calEvents = r.events;
+            _eventStatuses = r.statuses || {};
+            _calCache[_calCacheKey()] = {
+              events: _calEvents,
+              statuses: _eventStatuses,
+              fetchedAt: Date.now()
+            };
+          }
+        })
+        .getCalendarPageData(range.start.toISOString(), range.end.toISOString(), JSON.stringify([]));
+    } catch(e){}
+  }, 1500);
 }
  
 function toggleViewAs(){
@@ -2624,6 +2722,9 @@ function refreshScheduleData(){
     bellSchedules = r.bellSchedules || [];
     activeBell = r.activeBell || null;
     if (prefs.tileOrder.indexOf('schedule') > -1) renderSchedule();
+    hideWidgetLoader('schedule');
+  }).withFailureHandler(function(){
+    hideWidgetLoader('schedule');
   }).getMyScheduleWithBell(ds);
 }
 
@@ -2931,14 +3032,17 @@ function deleteCd(id){
 // LUNCH MENU
 var _lunchData=[], _lunchDay=null;
 function loadLunchMenu(){
+  showWidgetLoader('lunch','sm');
   google.script.run
     .withSuccessHandler(function(rows){
       _lunchData=rows||[];
       buildLunchTabs();
+      hideWidgetLoader('lunch');
     })
     .withFailureHandler(function(){
       var el=document.getElementById('lunch-body');
       if(el)el.innerHTML='<div class="lunch-empty">Could not load menu.</div>';
+      hideWidgetLoader('lunch');
     })
     .getLunchMenu();
 }
@@ -3772,7 +3876,11 @@ function removeLink(i){myLinks.splice(i,1);renderLinks();if(CU&&CU.role==='teach
 
 // WEATHER
 function renderWeatherInit(){if(prefs.weatherLat&&prefs.weatherLon)return '<div class="weather-loading"><div class="spinner" style="margin:0 auto 8px;"></div>Loading weather...</div>';return '<div style="text-align:center;padding:16px;"><p style="font-size:13px;color:var(--tx2);margin-bottom:14px;">Tap to set up weather.</p><button class="btn btn-primary" onclick="flipWidget(\'weather\')">Set Up Weather</button></div>';}
-function loadWeather(){if(!prefs.weatherLat||!prefs.weatherLon)return;fetchWeatherData(prefs.weatherLat,prefs.weatherLon,prefs.weatherCity||'');}
+function loadWeather(){
+  if(!prefs.weatherLat||!prefs.weatherLon)return;
+  showWidgetLoader('weather','sm');
+  fetchWeatherData(prefs.weatherLat,prefs.weatherLon,prefs.weatherCity||'');
+}
 function setWeatherView(v){prefs.weatherView=v;document.querySelectorAll('.weather-vbtn').forEach(function(b){b.className='btn btn-sm weather-vbtn '+(b.dataset.view===v?'btn-primary':'btn-ghost');});loadWeather();google.script.run.saveMyPrefs(JSON.stringify(prefs));}
 function fetchWeatherData(lat,lon,city){
   var vw=prefs.weatherView||'today';var el=document.getElementById('weather-body');if(!el)return;
@@ -3795,7 +3903,11 @@ function fetchWeatherData(lat,lon,city){
       html+='</div><button class="btn btn-ghost btn-sm" style="margin-top:10px;width:100%;" onclick="loadWeather()">Refresh</button>';
       el.innerHTML=html;
     }
-  }).catch(function(){if(el)el.innerHTML='<div class="weather-err">Could not load weather.</div>';});
+  }).catch(function(){
+    if(el)el.innerHTML='<div class="weather-err">Could not load weather.</div>';
+  }).finally(function(){
+    hideWidgetLoader('weather');
+  });
 }
 function useGeoLocation(){
   if(!navigator.geolocation){toast('Geolocation not supported','err');return;}
@@ -3896,7 +4008,7 @@ var calCursor = null;
 var _calSelectedDay = null;
 var _calEvents = [];
 var _calCache = {};
-var _calCacheTTL = 60000; // 1 min
+var _calCacheTTL = 300000; // 5 min
 var _calOverdueOpen = false;
 var _calCalsOpen = false;
 var _eventStatuses = {}; // {eventId: 'completed' | ''}
@@ -3951,7 +4063,7 @@ function buildCalPage(){
       '</div>' +
       '<div class="cal2-body">' +
         '<div class="cal2-main">' +
-          '<div class="cal2-load" id="cal2-load"><div class="spinner"></div></div>' +
+          '<div class="cal2-load" id="cal2-load"><div class="soaring-spinner"><div class="halo"></div><div class="crest"></div></div></div>' +
           '<div id="cal2-host"></div>' +
         '</div>' +
         '<div class="cal2-rail" id="cal2-rail"></div>' +
@@ -4041,8 +4153,19 @@ function _calRange(){
 }
 
 function _calCacheKey(){
-  var r = _calRange();
-  return calMode + '|' + r.start.toISOString() + '|' + r.end.toISOString();
+  // Cache key uses the FETCH range, not the display range, so navigating
+  // within a quarter hits cache instead of refetching.
+  var r = _calFetchRange();
+  return r.start.toISOString() + '|' + r.end.toISOString();
+}
+
+function _calFetchRange(){
+  // Fetch a 3-month window around the cursor — used only for server fetches
+  // and cache keys, not for what the user sees on screen.
+  var d = calCursor || new Date();
+  var start = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  var end = new Date(d.getFullYear(), d.getMonth() + 2, 0);
+  return {start: start, end: end};
 }
 
 function showCalLoading(on){
@@ -5177,7 +5300,7 @@ function renderScoresChart(){
   var pad=Math.max(120,Math.ceil((rawMax-rawMin)*0.25));
   var maxV=Math.ceil((rawMax+pad)/50)*50;
   var minV=Math.max(0,Math.floor((rawMin-pad)/50)*50);
-  var W=440,H=210,PL=48,PR=18,PT=22,PB=50;
+  var W=440,H=210,PL=58,PR=18,PT=22,PB=50;
   var cW=W-PL-PR,cH=H-PT-PB;
   function toX(i){return PL+i*(cW/8);}
   function toY(v){return PT+cH*(1-(v-minV)/(maxV-minV));}
@@ -5193,7 +5316,7 @@ function renderScoresChart(){
   [[0,2],[3,5],[6,8]].forEach(function(b,gi){
     var x1=toX(b[0])-(cW/8)*0.38,x2=toX(b[1])+(cW/8)*0.38;
     svg+='<rect x="'+x1+'" y="'+PT+'" width="'+(x2-x1)+'" height="'+cH+'" rx="4" fill="rgba(255,255,255,.02)"/>';
-    svg+='<text x="'+((toX(b[0])+toX(b[1]))/2)+'" y="'+(H-7)+'" fill="rgba(99,102,241,.7)" font-size="9" font-weight="700" text-anchor="middle" font-family="DM Sans,sans-serif">'+G_LABELS[gi]+'</text>';
+    svg+='<text x="'+((toX(b[0])+toX(b[1]))/2)+'" y="'+(H-7)+'" fill="var(--a2)" font-size="10" font-weight="600" text-anchor="middle" font-family="inherit" letter-spacing=".5">'+G_LABELS[gi]+'</text>';
     if(gi<2){var sx=toX(b[1])+(cW/8)*0.5;svg+='<line x1="'+sx+'" y1="'+PT+'" x2="'+sx+'" y2="'+(PT+cH)+'" stroke="rgba(255,255,255,.07)" stroke-width="1" stroke-dasharray="3,3"/>';}
   });
   // Goal dotted line
@@ -5202,7 +5325,7 @@ function renderScoresChart(){
     var gy=toY(clampedG);
     svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(W-PR)+'" y2="'+gy+'" stroke="var(--a2)" stroke-width="1.5" stroke-dasharray="5,4" opacity=".9"/>';
     svg+='<rect x="'+(W-PR-36)+'" y="'+(gy-11)+'" width="36" height="13" rx="3" fill="rgba(14,22,44,.85)"/>';
-    svg+='<text x="'+(W-PR-4)+'" y="'+(gy-2)+'" fill="var(--a2)" font-size="9" font-weight="700" text-anchor="end" font-family="DM Sans,sans-serif">'+goal+' L</text>';
+    svg+='<text x="'+(W-PR-4)+'" y="'+(gy-2)+'" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="end" font-family="inherit">'+goal+' L</text>';
   }
   // Build line segments (break at nulls)
   var segments=[],cur=[];
@@ -5236,17 +5359,17 @@ function renderScoresChart(){
       var y=toY(vals[i]);
       svg+='<circle cx="'+x+'" cy="'+y+'" r="5" fill="var(--a1)" stroke="#0f172a" stroke-width="2.5"/>';
       svg+='<circle cx="'+x+'" cy="'+y+'" r="2.5" fill="var(--a2)"/>';
-      var lblY=(y<PT+16)?y+18:y-10;
-      svg+='<text x="'+x+'" y="'+lblY+'" fill="var(--a2)" font-size="9" font-weight="700" text-anchor="middle" font-family="DM Sans,sans-serif">'+vals[i]+'</text>';
+      var lblY=(y<PT+16)?y+16:y-8;
+      svg+='<text x="'+x+'" y="'+lblY+'" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="middle" font-family="inherit">'+vals[i]+'</text>';
     } else {
       svg+='<circle cx="'+x+'" cy="'+(PT+cH/2)+'" r="3.5" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="1.5" stroke-dasharray="2,2"/>';
     }
-    svg+='<text x="'+x+'" y="'+(PT+cH+15)+'" fill="rgba(148,163,184,.5)" font-size="8" text-anchor="middle" font-family="DM Sans,sans-serif">'+S_LABELS[i]+'</text>';
+    svg+='<text x="'+x+'" y="'+(PT+cH+15)+'" fill="rgba(148,163,184,.6)" font-size="9" text-anchor="middle" font-family="inherit">'+S_LABELS[i]+'</text>';
   }
   // Axes
   svg+='<line x1="'+PL+'" y1="'+PT+'" x2="'+PL+'" y2="'+(PT+cH)+'" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
   svg+='<line x1="'+PL+'" y1="'+(PT+cH)+'" x2="'+(W-PR)+'" y2="'+(PT+cH)+'" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
-  svg+='<text x="12" y="'+(PT+cH/2)+'" fill="rgba(148,163,184,.45)" font-size="9" text-anchor="middle" font-family="DM Sans,sans-serif" transform="rotate(-90,12,'+(PT+cH/2)+')">Lexile</text>';
+  svg+='<text x="14" y="'+(PT+cH/2)+'" fill="rgba(148,163,184,.55)" font-size="9" font-weight="600" letter-spacing="1" text-anchor="middle" font-family="inherit" transform="rotate(-90,14,'+(PT+cH/2)+')">LEXILE</text>';
   svg+='</svg>';
   el.innerHTML=svg;
 }
@@ -5300,6 +5423,32 @@ function closeModal(id){
 }
 document.querySelectorAll('.overlay').forEach(function(el){el.addEventListener('click',function(e){if(e.target===el)el.classList.remove('open');});});
 function doUpdateName(){var name=document.getElementById('m-name').value.trim();if(!name)return;google.script.run.withSuccessHandler(function(){CU.name=name;document.getElementById('uname').textContent=name;document.getElementById('top-av').textContent=name.charAt(0).toUpperCase();closeModal('name-modal');toast('Name updated','ok');}).updateMyName(name);}
+
+// ── WIDGET LOADER ─────────────────────────────────────────────
+// showWidgetLoader('tasks') overlays a soaring-crest spinner on the tile.
+// hideWidgetLoader('tasks') removes it. Safe to call hide even if never shown.
+// Use size='sm', 'md' (default), or 'lg' for different spinner sizes.
+function showWidgetLoader(tileId, size){
+  var tile=document.getElementById('tile-'+tileId);
+  if(!tile)return;
+  // Don't double-stack
+  var existing=tile.querySelector('.widget-loader-overlay');
+  if(existing)return;
+  var overlay=document.createElement('div');
+  overlay.className='widget-loader-overlay';
+  overlay.innerHTML='<div class="soaring-spinner '+(size||'')+'"><div class="halo"></div><div class="crest"></div></div>';
+  // Tile must be position:relative for absolute overlay to work — add only if missing
+  var cs=window.getComputedStyle(tile);
+  if(cs.position==='static')tile.style.position='relative';
+  tile.appendChild(overlay);
+}
+function hideWidgetLoader(tileId){
+  var tile=document.getElementById('tile-'+tileId);
+  if(!tile)return;
+  var overlay=tile.querySelector('.widget-loader-overlay');
+  if(overlay)overlay.remove();
+}
+
 function toast(msg,type){type=type||'inf';var el=document.createElement('div');el.className='toast '+type;el.textContent=msg;document.getElementById('toasts').appendChild(el);setTimeout(function(){el.remove();},3200);}
 function fmtTime(t){
   if(!t)return'';
@@ -5494,6 +5643,7 @@ function loadMyRows(){
   // Hide the request button for teachers (no peer-to-peer requests)
   var btn = document.getElementById('row-req-btn');
   if(btn) btn.style.display = (CU.role === 'student') ? '' : 'none';
+  showWidgetLoader('rowbank','sm');
   google.script.run.withSuccessHandler(function(r){
     var num = document.getElementById('row-bal-num');
     if(num) num.textContent = r.success ? String(r.balance) : '0';
@@ -5503,8 +5653,10 @@ function loadMyRows(){
   }).getMyRowBalance();
   google.script.run.withSuccessHandler(function(r){
     renderMyRowHistory(r && r.history ? r.history : []);
+    hideWidgetLoader('rowbank');
   }).withFailureHandler(function(){
     renderMyRowHistory([]);
+    hideWidgetLoader('rowbank');
   }).getMyRowHistory();
   if(!window._rowTeachers && CU.role === 'student'){
     google.script.run.withSuccessHandler(function(list){
@@ -5591,10 +5743,11 @@ function loadRowApprovals(){
     body.innerHTML = '<div class="empty"><p style="font-size:12px;">Teacher access only.</p></div>';
     return;
   }
-  body.innerHTML = '<div style="text-align:center;padding:14px;color:var(--tx3);font-size:12px;">Loading...</div>';
+  showWidgetLoader('rowapprovals','sm');
   google.script.run.withSuccessHandler(function(r){
     if(!r.success){
       body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">'+esc(r.error||'Error')+'</div>';
+      hideWidgetLoader('rowapprovals');
       return;
     }
     if(!r.requests.length){
@@ -5605,8 +5758,10 @@ function loadRowApprovals(){
       var when = req.createdAt ? fmtDate(req.createdAt.slice(0,10)) : '';
       return '<div class="row-req" id="rr-'+esc(req.id)+'"><div class="row-req-top"><div class="row-req-name">'+esc(req.studentName)+'</div><span class="row-req-cat">'+esc(req.category)+'</span>'+(when?'<span class="row-req-time">'+when+'</span>':'')+'</div><div class="row-req-desc">'+esc(req.description)+'</div><div class="row-req-actions"><input class="finp" type="number" id="ra-amt-'+esc(req.id)+'" value="1" min="1" max="10" title="Amount"><input class="finp cmt" type="text" id="ra-cmt-'+esc(req.id)+'" placeholder="Comment (optional)" maxlength="200"><button class="btn btn-primary btn-sm" onclick="approveRowReq(\''+esc(req.id)+'\')">Approve</button><button class="btn btn-danger btn-sm" onclick="denyRowReq(\''+esc(req.id)+'\')">Deny</button></div></div>';
     }).join('')+'</div>';
+    hideWidgetLoader('rowapprovals');
   }).withFailureHandler(function(e){
     body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">'+esc(e.message)+'</div>';
+    hideWidgetLoader('rowapprovals');
   }).getPendingRowRequestsForTeacher();
 }
  
@@ -5836,6 +5991,15 @@ function renderRowHistList(){
 // ─── RAIL ────────────────────────────────────────────────────
 function faviconUrl(url){try{var d=new URL(url.startsWith('http')?url:'https://'+url).hostname;return'https://www.google.com/s2/favicons?domain='+d+'&sz=64';}catch(e){return '';}}
 function loadMyAssignedLinks(){
+  // Use the data preloaded by getBootData if it's available — no extra round-trip.
+  if(window._preloadedAssignedLinks!==undefined && window._preloadedAssignedLinks!==null){
+    if(!(CU&&CU.role==='teacher')){
+      renderLinkRail(window._preloadedAssignedLinks||[]);
+      window._preloadedAssignedLinks=null;
+      return;
+    }
+    window._preloadedAssignedLinks=null;
+  }
   if(CU&&CU.role==='teacher'){
     google.script.run
       .withSuccessHandler(function(r){
@@ -6026,18 +6190,14 @@ function buildAdminPage(){
     +'<div class="push-card">'
     +'<div style="font-size:13px;font-weight:600;color:var(--tx2);margin-bottom:6px;">&#127829; Lunch Menu Import</div>'
     +'<div style="font-size:13px;color:var(--tx3);line-height:1.8;margin-bottom:12px;">'
-    +'Paste one lunch day per line. Format:<br>'
-    +'<code style="font-size:11px;background:rgba(255,255,255,.06);padding:3px 7px;border-radius:5px;color:var(--a2);">M/D | Main Item | Side 1 | Side 2 | Side 3 | Vegetarian Option | Notes</code><br>'
-    +'<span style="font-size:11px;color:var(--tx4);">Side 3, Vegetarian, and Notes columns are optional. Leave blank with | | between pipes. '
-    +'Year is inferred automatically — paste next month\'s data any time. Duplicate dates are skipped safely.</span>'
+    +'Paste the lunch menu text directly from the PDF. Each day starts with a main course followed by the day-of-month number, then sides on separate lines, ending with "Milk".<br>'
+    +'<span style="font-size:11px;color:var(--tx4);">The month is inferred from today\'s date — paste next month\'s menu any time and it lands in the right month. Duplicate days are skipped safely. Sheet keeps two months at a time.</span>'
     +'</div>'
     +'<div style="font-size:11px;font-weight:600;color:var(--tx4);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Example</div>'
-    +'<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--tx3);background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.9;">'
-    +'4/1 | Taco Meat | Refried Beans | Shredded Lettuce | Shredded Cheese | Refried Beans | Pears<br>'
-    +'4/2 | Max Sticks | Green Beans | Romaine Salad | Fruit Mix | |<br>'
-    +'4/7 | Chicken Alfredo | Corn | Grape Tomatoes | Roll | | Apple Juice'
+    +'<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--tx3);background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7;white-space:pre;">'
+    +'Fish Sticks 1\nBaked Beans\nPeaches\nCelery\nHush Puppies\nMilk\nChicken Sandwich 4\nWG Bun\nRomaine Salad\nBlueberries\nGrape Tomatoes\nMilk'
     +'</div>'
-    +'<textarea class="fta" id="lunch-import-ta" placeholder="—Paste lunch menu here—" style="min-height:160px;font-family:\'DM Mono\',monospace;font-size:12px;"></textarea>'
+    +'<textarea class="fta" id="lunch-import-ta" placeholder="—Paste menu text here—" style="min-height:240px;font-family:\'DM Mono\',monospace;font-size:12px;"></textarea>'
     +'<div style="display:flex;gap:8px;margin-top:10px;">'
     +'<button class="btn btn-primary" onclick="doLunchImport()">&#129395; Import Lunch Data</button>'
     +'<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'lunch-import-ta\').value=\'\'">Clear</button>'
@@ -6160,16 +6320,17 @@ function loadAdminStats(){
 function doLunchImport(){
   var ta=document.getElementById('lunch-import-ta');
   var res=document.getElementById('lunch-import-result');
-  var text=ta?ta.value.trim():'';
-  if(!text){toast('Paste some lunch data first','err');return;}
+  var text=ta?ta.value:'';
+  if(!text||!text.trim()){toast('Paste some lunch data first','err');return;}
   if(res)res.innerHTML='<div style="color:var(--tx3);font-size:12px;">Importing...</div>';
   google.script.run
     .withSuccessHandler(function(r){
       if(!res)return;
       if(!r.success){res.innerHTML='<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#f87171;">&#10005; '+esc(r.error)+'</div>';return;}
       var errHtml=r.errors&&r.errors.length?'<div style="margin-top:8px;font-size:11px;color:#f59e0b;">Warnings:<br>'+r.errors.map(function(e){return esc(e);}).join('<br>')+'</div>':'';
+      var monthLbl=r.targetMonth?' to <strong>'+esc(r.targetMonth)+'</strong>':'';
       res.innerHTML='<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#22c55e;">'
-        +'&#10003; Imported <strong>'+r.added+'</strong> day(s)'
+        +'&#10003; Imported <strong>'+r.added+'</strong> day(s)'+monthLbl
         +(r.skipped?' &mdash; <span style="color:var(--tx3);">'+r.skipped+' already existed, skipped</span>':'')
         +'</div>'+errHtml;
       if(r.added>0&&ta)ta.value='';

@@ -53,7 +53,9 @@ function safeTime(val) {
 }
 
 // ─── USER IDENTITY ───────────────────────────────────────────
+var _cuCache = null;
 function getCurrentUser() {
+  if (_cuCache) return _cuCache;
   try {
     const email = getEmail();
     if (!email) {
@@ -92,13 +94,14 @@ function getCurrentUser() {
     if (realRole === 'teacher' && viewAs === 'student') {
       displayRole = 'student';
     }
-    return {
+    _cuCache = {
       email: email,
       name: name,
       role: displayRole,
       realRole: realRole,
       group: group
     };
+    return _cuCache;
   } catch(e) {
     return {error: 'EXCEPTION', message: e.toString()};
   }
@@ -1542,24 +1545,145 @@ function runDataCleanup(target) {
   }
 }
 
-function importLunchData(rows) {
+function importLunchData(rawText) {
   var u = getCurrentUser();
   if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
-  if (!Array.isArray(rows) || !rows.length) return {success: false, error: 'No rows'};
+  if (!rawText || typeof rawText !== 'string') return {success: false, error: 'No text provided'};
+
   var sheet = getSheet('LunchMenu');
   if (!sheet) return {success: false, error: 'LunchMenu sheet missing'};
-  var added = 0;
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    if (!r.date) continue;
+
+  // Auto-clean: keep only the last 60 days of menu data so the sheet doesn't grow forever.
+  try {
+    var cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 60);
+    var allData = sheet.getDataRange().getValues();
+    for (var r = allData.length - 1; r >= 1; r--) {
+      var d = allData[r][0];
+      if (!d) continue;
+      var dateVal = d instanceof Date ? d : new Date(d);
+      if (!isNaN(dateVal) && dateVal < cutoff) {
+        sheet.deleteRow(r + 1);
+      }
+    }
+  } catch(e) {
+    // Don't block the import if cleanup fails
+  }
+
+  // Parse the multi-line PDF text format into per-day records.
+  // Format pattern: line ending with a number = main course + day-of-month.
+  // All lines after that until "Milk" are sides. "Milk" closes the day.
+  var lines = rawText.split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+
+  // Skip the day-of-week header row if it's present
+  var dowHeader = /^MONDAY\s+TUESDAY\s+WEDNESDAY\s+THURSDAY\s+FRIDAY/i;
+  lines = lines.filter(function(l){ return !dowHeader.test(l); });
+
+  // Skip the trailing chef salad disclaimer
+  lines = lines.filter(function(l){
+    return !/chef salad is offered/i.test(l) && !/menu is subject to change/i.test(l);
+  });
+
+  // Skip lines that are just numbers (the empty placeholder days like "19 20 21 22")
+  lines = lines.filter(function(l){ return !/^[\d\s]+$/.test(l); });
+
+  var days = [];
+  var current = null;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    // Main course detection: line ends with " <number>" (1-31)
+    var m = line.match(/^(.+?)\s+(\d{1,2})$/);
+    if (m && parseInt(m[2], 10) >= 1 && parseInt(m[2], 10) <= 31) {
+      // Save the previous day if we had one
+      if (current) days.push(current);
+      current = {
+        day: parseInt(m[2], 10),
+        main: m[1].trim(),
+        sides: []
+      };
+    } else if (current) {
+      // It's a side, veg note, or "Milk"
+      if (/^milk$/i.test(line)) {
+        // Milk closes the day; don't store it as a side
+        days.push(current);
+        current = null;
+      } else {
+        current.sides.push(line);
+      }
+    }
+  }
+  // Catch any final day that didn't end with "Milk"
+  if (current) days.push(current);
+
+  if (!days.length) {
+    return {success: false, error: 'Could not find any menu days in the text. Make sure each day has a main course followed by a number (e.g. "Fish Sticks 1").'};
+  }
+
+  // Ask the user which month/year these days belong to.
+  // Strategy: figure out the month from context if possible. The teacher
+  // pastes one month at a time, so we need a hint. For now, infer from
+  // existing entries: pick the next month that hasn't been imported yet.
+  // We assume the first day in the list is in the current month or the
+  // next month — whichever makes more sense given today's date.
+  var tz = Session.getScriptTimeZone();
+  var today = new Date();
+  var firstDay = days[0].day;
+
+  // Try this month first; if the first day is earlier than today, jump to next month.
+  var targetYear = today.getFullYear();
+  var targetMonth = today.getMonth();
+  if (firstDay < today.getDate() - 7) {
+    // First day in the menu is more than a week behind today — must be next month
+    targetMonth++;
+    if (targetMonth > 11) { targetMonth = 0; targetYear++; }
+  }
+
+  // Pull existing dates in target month so we can skip duplicates
+  var existing = {};
+  try {
+    var data = sheet.getDataRange().getValues();
+    for (var r = 1; r < data.length; r++) {
+      if (!data[r][0]) continue;
+      var d = data[r][0] instanceof Date ? data[r][0] : new Date(data[r][0]);
+      if (isNaN(d)) continue;
+      if (d.getFullYear() === targetYear && d.getMonth() === targetMonth) {
+        existing[d.getDate()] = true;
+      }
+    }
+  } catch(e) {}
+
+  var added = 0, skipped = 0;
+  var errors = [];
+  for (var di = 0; di < days.length; di++) {
+    var dy = days[di];
+    if (existing[dy.day]) { skipped++; continue; }
+    var dateObj = new Date(targetYear, targetMonth, dy.day, 12, 0, 0);
+    if (isNaN(dateObj)) {
+      errors.push('Invalid date for day ' + dy.day);
+      continue;
+    }
+    var s1 = dy.sides[0] || '';
+    var s2 = dy.sides[1] || '';
+    var s3 = dy.sides[2] || '';
+    // Anything beyond 3 sides goes into Notes
+    var extraNotes = dy.sides.slice(3).join(', ');
     sheet.appendRow([
-      new Date(r.date + 'T12:00:00'),
-      r.main || '', r.side1 || '', r.side2 || '', r.side3 || '',
-      r.veg || '', r.notes || ''
+      dateObj,
+      dy.main,
+      s1, s2, s3,
+      '',          // Vegetarian column — not in your PDF format
+      extraNotes
     ]);
     added++;
   }
-  return {success: true, added: added};
+
+  return {
+    success: true,
+    added: added,
+    skipped: skipped,
+    errors: errors,
+    targetMonth: Utilities.formatDate(new Date(targetYear, targetMonth, 1), tz, 'MMMM yyyy')
+  };
 }
 
 function repairSheetsFromApp() {
@@ -1688,47 +1812,59 @@ function getMyCalendarsList() {
 // Fetch events between two dates from all visible calendars
 function getCalendarEvents(startDateStr, endDateStr, hiddenCalIdsJson) {
   try {
-    if (typeof Calendar === 'undefined' || !Calendar.Events) {
-      return {success: false, error: 'Calendar service not enabled. In the Apps Script editor, click + next to Services, add Google Calendar API.', events: []};
-    }
     var hidden = [];
     if (hiddenCalIdsJson) {
       try { hidden = JSON.parse(hiddenCalIdsJson) || []; } catch(e) {}
     }
-    var cals = getMyCalendarsList();
+    var cals = getMyCalendarsList().filter(function(c){
+      return hidden.indexOf(c.id) === -1;
+    });
+    if (!cals.length) return {success: true, events: []};
+
+    // Fetch all calendars in parallel using the REST API directly.
+    // UrlFetchApp.fetchAll fires every request at once instead of one-by-one.
+    var token = ScriptApp.getOAuthToken();
+    var timeMin = new Date(startDateStr).toISOString();
+    var timeMax = new Date(endDateStr).toISOString();
+    var requests = cals.map(function(cal){
+      var url = 'https://www.googleapis.com/calendar/v3/calendars/'
+        + encodeURIComponent(cal.id) + '/events'
+        + '?timeMin=' + encodeURIComponent(timeMin)
+        + '&timeMax=' + encodeURIComponent(timeMax)
+        + '&singleEvents=true&orderBy=startTime&maxResults=500';
+      return {
+        url: url,
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true
+      };
+    });
+
+    var responses = UrlFetchApp.fetchAll(requests);
     var events = [];
-    cals.forEach(function(cal) {
-      if (hidden.indexOf(cal.id) > -1) return;
-      try {
-        var resp = Calendar.Events.list(cal.id, {
-          timeMin: new Date(startDateStr).toISOString(),
-          timeMax: new Date(endDateStr).toISOString(),
-          singleEvents: true,
-          orderBy: 'startTime',
-          maxResults: 500
+    responses.forEach(function(resp, idx){
+      if (resp.getResponseCode() !== 200) return;
+      var cal = cals[idx];
+      var body;
+      try { body = JSON.parse(resp.getContentText()); } catch(e){ return; }
+      (body.items || []).forEach(function(ev){
+        if (!ev.start) return;
+        var start = ev.start.dateTime || ev.start.date;
+        var end = ev.end ? (ev.end.dateTime || ev.end.date) : start;
+        events.push({
+          id: ev.id,
+          calendarId: cal.id,
+          calendarName: cal.name,
+          calendarColor: cal.color,
+          title: ev.summary || '(No title)',
+          description: ev.description || '',
+          location: ev.location || '',
+          start: start,
+          end: end,
+          allDay: !ev.start.dateTime,
+          recurring: !!ev.recurringEventId,
+          htmlLink: ev.htmlLink || ''
         });
-        (resp.items || []).forEach(function(ev) {
-          if (!ev.start) return;
-          var start = ev.start.dateTime || ev.start.date;
-          var end = ev.end ? (ev.end.dateTime || ev.end.date) : start;
-          events.push({
-            id: ev.id,
-            calendarId: cal.id,
-            calendarName: cal.name,
-            calendarColor: cal.color,
-            title: ev.summary || '(No title)',
-            description: ev.description || '',
-            location: ev.location || '',
-            start: start,
-            end: end,
-            allDay: !ev.start.dateTime,
-            recurring: !!ev.recurringEventId,
-            htmlLink: ev.htmlLink || ''
-          });
-        });
-      } catch(err) {
-        // skip calendars we can't list
-      }
+      });
     });
     return {success: true, events: events};
   } catch(e) {
@@ -1919,3 +2055,51 @@ function getMyCalendars() {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// BOOT — single round-trip for everything the home page needs
+// ════════════════════════════════════════════════════════════
+function getBootData() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return { user: u };
+
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+    // Load prefs
+    var prefs = getDefaultPrefs();
+    try {
+      var prefsSheet = ss.getSheetByName('Prefs');
+      if (prefsSheet) {
+        var pData = prefsSheet.getDataRange().getValues();
+        for (var i = 1; i < pData.length; i++) {
+          if (pData[i][0] === u.email) {
+            try { prefs = JSON.parse(pData[i][1]); } catch(e) {}
+            break;
+          }
+        }
+      }
+    } catch(e) {}
+
+    // Load home data, embedded docs, bell schedules, assigned links
+    var home = getHomeData();
+    var assignedLinks = (u.realRole === 'teacher')
+      ? null  // teachers fetch their own links separately
+      : getAssignedLinksForStudent(u.email);
+
+    return {
+      user: u,
+      prefs: prefs,
+      tasks: home.tasks || [],
+      schedule: home.schedule || [],
+      notes: home.notes || '',
+      links: home.links || [],
+      embeddedDocs: home.embeddedDocs || [],
+      bellSchedules: home.bellSchedules || [],
+      activeBell: home.activeBell || null,
+      assignedLinks: assignedLinks
+    };
+  } catch(e) {
+    return { error: true, message: e.toString() };
+  }
+}

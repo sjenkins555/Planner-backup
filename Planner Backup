@@ -152,6 +152,8 @@ function safeTime(val) {
 // ─── USER ────────────────────────────────────────────────────
 function getCurrentUser() { return Lib.getCurrentUser(); }
 
+function getBootData() { return Lib.getBootData(); }
+
 function setViewAsRole(role) { return Lib.setViewAsRole(role); }
  
 function getViewAsRole() { return Lib.getViewAsRole(); }
@@ -318,4 +320,3 @@ function adminGetAllRowAccounts() { return Lib.adminGetAllRowAccounts(); }
 function adminAdjustRowBalance(studentEmail, delta, reason) { return Lib.adminAdjustRowBalance(studentEmail, delta, reason); }
 function adminGetAllRowTransactions(limit) { return Lib.adminGetAllRowTransactions(limit); }
 function adminSpendRows(studentEmail, amount, item) { return Lib.adminSpendRows(studentEmail, amount, item); }
-

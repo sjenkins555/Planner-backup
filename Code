@@ -4,11 +4,15 @@
 // ============================================================
 
 function doGet(e) {
-  return HtmlService.createHtmlOutputFromFile('Index')
+  return HtmlService.createTemplateFromFile('Index').evaluate()
     .setTitle('Hawks Middle School Planner')
     .setFaviconUrl('https://raw.githubusercontent.com/sjenkins555/cedar-hollow-assets/main/CH%20Hawks%20Crest.png')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function include(filename){
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
 // ─── TOOLBAR MENU ─────────────────────────────────────────────
@@ -61,7 +65,8 @@ function allSheetDefs() {
     'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
     'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
     'BellScheduleConfig':['Key','Value'],
-    'EventStatus':['Email','EventID','Completed','UpdatedAt']
+    'EventStatus':['Email','EventID','Completed','UpdatedAt'],
+    'Reminders':['ID','CreatedBy','AssignedTo','Source','Title','Body','TriggerAt','LinkedTaskId','Subject','DismissedBy','CreatedAt']
   };
 }
 
@@ -320,3 +325,13 @@ function adminGetAllRowAccounts() { return Lib.adminGetAllRowAccounts(); }
 function adminAdjustRowBalance(studentEmail, delta, reason) { return Lib.adminAdjustRowBalance(studentEmail, delta, reason); }
 function adminGetAllRowTransactions(limit) { return Lib.adminGetAllRowTransactions(limit); }
 function adminSpendRows(studentEmail, amount, item) { return Lib.adminSpendRows(studentEmail, amount, item); }
+
+// ─── REMINDERS ────────────────────────────────────────────────
+function getMyReminders() { return Lib.getMyReminders(); }
+function addMyReminder(title, body, triggerAt, linkedTaskId, subject) { return Lib.addMyReminder(title, body, triggerAt, linkedTaskId, subject); }
+function dismissReminder(id) { return Lib.dismissReminder(id); }
+function deleteReminder(id) { return Lib.deleteReminder(id); }
+function pushReminder(targetType, targetValue, title, body, triggerAt, subject) { return Lib.pushReminder(targetType, targetValue, title, body, triggerAt, subject); }
+function sendSchoolReminder(title, body, triggerAt) { return Lib.sendSchoolReminder(title, body, triggerAt); }
+function getMyCreatedReminders() { return Lib.getMyCreatedReminders(); }
+

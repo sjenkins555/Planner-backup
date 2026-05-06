@@ -1,0 +1,202 @@
+<script>
+
+// ─── REMINDERS ────────────────────────────────────────────────
+var _myReminders = [];
+var _shownToastIds = {};
+function loadReminders(){
+  var area = document.getElementById('reminders-area');
+  if(area) showWidgetLoader('reminders','sm');
+  google.script.run.withSuccessHandler(function(r){
+    _myReminders = (r && r.reminders) ? r.reminders : [];
+    renderRemindersWidget();
+    showNewestRemindersToast();
+    hideWidgetLoader('reminders');
+  }).withFailureHandler(function(){
+    hideWidgetLoader('reminders');
+    if(area) area.innerHTML = '<div class="rem-empty">Could not load reminders.</div>';
+  }).getMyReminders();
+}
+function renderRemindersWidget(){
+  updateRemBell();
+  var area = document.getElementById('reminders-area');
+  if(!area) return;
+  if(!_myReminders.length){
+    area.innerHTML = '<div class="rem-empty">No active reminders. Click + Add to set one.</div>';
+    return;
+  }
+  area.innerHTML = '<div class="rem-list">' + _myReminders.map(function(r){
+    var src = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
+    var when = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.isRipe ? 'Right now' : '');
+    var label = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
+    var canDelete = r.isMine || (CU && CU.realRole === 'teacher');
+    var ripeCls = r.isRipe ? '' : ' upcoming';
+    return '<div class="rem-row ' + src + ripeCls + '" onclick="dismissReminderClick(\'' + r.id + '\')">'
+      + '<div class="rem-row-top">'
+      + '<span class="rem-pill ' + src + '">' + label + (r.isRipe ? '' : ' • UPCOMING') + '</span>'
+      + (canDelete ? '<button class="rem-row-x" onclick="event.stopPropagation();deleteReminderClick(\'' + r.id + '\')" title="Delete"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>' : '<span></span>')
+      + '</div>'
+      + '<div class="rem-row-title">' + esc(r.title) + '</div>'
+      + (r.body ? '<div class="rem-row-body">' + esc(r.body) + '</div>' : '')
+      + (when ? '<div class="rem-row-time">' + when + '</div>' : '')
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+function showNewestRemindersToast(){
+  // Show the newest unseen reminder as a toast like the screenshot
+  for(var i = 0; i < _myReminders.length; i++){
+    var r = _myReminders[i];
+    if(_shownToastIds[r.id]) continue;
+    _shownToastIds[r.id] = true;
+    showReminderToast(r);
+    break; // only one at a time
+  }
+}
+function showReminderToast(r){
+  // Remove any existing toast
+  var existing = document.getElementById('rem-toast-' + r.id);
+  if(existing) return;
+  var prev = document.querySelector('.rem-toast');
+  if(prev) prev.remove();
+  var src = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
+  var label = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
+  var when = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.createdAt ? remTimeAgo(r.createdAt) : '');
+  var toast = document.createElement('div');
+  toast.className = 'rem-toast ' + src;
+  toast.id = 'rem-toast-' + r.id;
+  toast.innerHTML = '<div class="rem-toast-top">'
+    + '<span class="rem-pill ' + src + '">' + label + '</span>'
+    + '<button class="rem-toast-x" onclick="closeReminderToast(\'' + r.id + '\')">\u00d7</button>'
+    + '</div>'
+    + '<div class="rem-toast-title">' + esc(r.title) + '</div>'
+    + (r.body ? '<div class="rem-toast-body">' + esc(r.body) + '</div>' : '')
+    + (when ? '<div class="rem-toast-time">' + when + '</div>' : '');
+  document.body.appendChild(toast);
+  // Auto-fade after 12s
+  setTimeout(function(){
+    if(document.getElementById('rem-toast-' + r.id)) closeReminderToast(r.id);
+  }, 12000);
+}
+function closeReminderToast(id){
+  var el = document.getElementById('rem-toast-' + id);
+  if(el) el.remove();
+}
+function dismissReminderClick(id){
+  if(!confirm('Dismiss this reminder?')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if(r && r.success){
+      _myReminders = _myReminders.filter(function(x){return x.id !== id;});
+      renderRemindersWidget();
+      closeReminderToast(id);
+      toast('Dismissed','inf');
+    } else toast(r.error || 'Could not dismiss','err');
+  }).dismissReminder(id);
+}
+var _remBellOpen = false;
+function _remIsTodayOrTomorrow(r){
+  if(r.isRipe) return true;
+  if(!r.triggerAt) return true;
+  var t = new Date(r.triggerAt);
+  if(isNaN(t)) return false;
+  var now = new Date();
+  var endOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate()+2, 0, 0, 0);
+  return t < endOfTomorrow;
+}
+function updateRemBell(){
+  var bell = document.getElementById('rem-bell');
+  if(!bell) return;
+  var arr = (_myReminders||[]).filter(_remIsTodayOrTomorrow);
+  var n = arr.length;
+  var countEl = bell.querySelector('.rem-bell-count');
+  if(countEl) countEl.textContent = n > 99 ? '99+' : n;
+  bell.style.display = n > 0 ? 'flex' : 'none';
+  if(_remBellOpen) renderRemBellPanel();
+}
+function toggleRemBell(e){
+  if(e) e.stopPropagation();
+  _remBellOpen = !_remBellOpen;
+  var p = document.getElementById('rem-bell-panel');
+  if(!p) return;
+  p.style.display = _remBellOpen ? 'block' : 'none';
+  if(_remBellOpen) renderRemBellPanel();
+}
+function renderRemBellPanel(){
+  var list = document.getElementById('rem-bell-list');
+  if(!list) return;
+  var items = (_myReminders||[]).filter(_remIsTodayOrTomorrow);
+  if(!items.length){
+    list.innerHTML = '<div style="font-size:12px;opacity:.6;text-align:center;padding:10px;">Nothing for today or tomorrow.</div>';
+    return;
+  }
+  list.innerHTML = items.map(function(r){
+    var when = r.triggerAt ? remTimeAgo(r.triggerAt) : 'Right now';
+    return '<div class="rem-bell-row">'
+      + '<div class="rem-bell-row-title">' + esc(r.title) + '</div>'
+      + (r.body ? '<div class="rem-bell-row-body">' + esc(r.body) + '</div>' : '')
+      + '<div class="rem-bell-row-when">' + when + '</div>'
+      + '</div>';
+  }).join('');
+}
+document.addEventListener('click', function(e){
+  if(!_remBellOpen) return;
+  var bell = document.getElementById('rem-bell');
+  var panel = document.getElementById('rem-bell-panel');
+  if(bell && bell.contains(e.target)) return;
+  if(panel && panel.contains(e.target)) return;
+  _remBellOpen = false;
+  if(panel) panel.style.display = 'none';
+});
+function deleteReminderClick(id){
+  if(!confirm('Delete this reminder for everyone?')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if(r && r.success){
+      _myReminders = _myReminders.filter(function(x){return x.id !== id;});
+      renderRemindersWidget();
+      closeReminderToast(id);
+      toast('Deleted','inf');
+    } else toast(r.error || 'Could not delete','err');
+  }).deleteReminder(id);
+}
+function saveMyReminderInline(){
+  var title = (document.getElementById('rem-title')||{}).value || '';
+  var body = (document.getElementById('rem-body')||{}).value || '';
+  var when = (document.getElementById('rem-when')||{}).value || '';
+  if(!title.trim()){toast('Title is required','err'); return;}
+  var triggerISO = when ? new Date(when).toISOString() : '';
+  google.script.run.withSuccessHandler(function(r){
+    if(r && r.success){
+      unflipWidget('reminders');
+      toast('Reminder saved','ok');
+      loadReminders();
+    } else toast((r && r.error) || 'Error saving reminder','err');
+  }).addMyReminder(title.trim(), body.trim(), triggerISO, '', '');
+}
+function remTimeAgo(iso){
+  if(!iso) return '';
+  try {
+    var d = new Date(iso);
+    if(isNaN(d)) return '';
+    var diffMs = d.getTime() - Date.now();
+    var future = diffMs > 0;
+    var absMin = Math.abs(Math.round(diffMs / 60000));
+    var absHr = Math.round(absMin / 60);
+    var absDy = Math.round(absHr / 24);
+    if(future){
+      if(absMin < 1) return 'in a moment';
+      if(absMin < 60) return 'in ' + absMin + ' min';
+      if(absHr < 24) return 'in ' + absHr + 'h';
+      if(absDy === 1) return 'tomorrow';
+      if(absDy < 7) return 'in ' + absDy + ' days';
+      return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    } else {
+      if(absMin < 1) return 'just now';
+      if(absMin < 60) return absMin + ' min ago';
+      if(absHr < 24) return absHr + 'h ago';
+      if(absDy === 1) return 'yesterday';
+      if(absDy < 7) return absDy + 'd ago';
+      return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    }
+  } catch(e) { return ''; }
+}
+
+</script>

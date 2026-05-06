@@ -1765,7 +1765,8 @@ function allSheetDefs() {
     'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
     'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
     'BellScheduleConfig':['Key','Value'],
-    'EventStatus':['Email','EventID','Completed','UpdatedAt']
+    'EventStatus':['Email','EventID','Completed','UpdatedAt'],
+    'Reminders':['ID','CreatedBy','AssignedTo','Source','Title','Body','TriggerAt','LinkedTaskId','Subject','DismissedBy','CreatedAt']
   };
 }
 
@@ -2101,5 +2102,224 @@ function getBootData() {
     };
   } catch(e) {
     return { error: true, message: e.toString() };
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// REMINDERS
+// ════════════════════════════════════════════════════════════
+
+function _myGroupNamesForReminders(email) {
+  try {
+    var groups = getGroups();
+    return groups
+      .filter(function(g) { return g.emails.indexOf(email) > -1; })
+      .map(function(g) { return g.name; });
+  } catch(e) { return []; }
+}
+
+function _isAssignedToMe(assignedTo, email, myGroupNames) {
+  if (!assignedTo) return false;
+  if (assignedTo === 'all') return true;
+  if (assignedTo === email) return true;
+  if (myGroupNames.indexOf(assignedTo) > -1) return true;
+  return false;
+}
+
+function getMyReminders() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, reminders: []};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: true, reminders: []};
+    var data = sheet.getDataRange().getValues();
+    var myGroups = _myGroupNamesForReminders(u.email);
+    var now = new Date();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      var assignedTo = String(data[i][2] || '');
+      if (!_isAssignedToMe(assignedTo, u.email, myGroups)) continue;
+      var dismissed = [];
+      try { dismissed = JSON.parse(data[i][9] || '[]'); } catch(e) {}
+      if (dismissed.indexOf(u.email) > -1) continue;
+      var triggerAt = data[i][6];
+      var tDate = null;
+      if (triggerAt) {
+        tDate = triggerAt instanceof Date ? triggerAt : new Date(triggerAt);
+        if (isNaN(tDate)) tDate = null;
+      }
+      var isRipe = !tDate || tDate <= now;
+      out.push({
+        id: String(data[i][0]),
+        createdBy: String(data[i][1] || ''),
+        assignedTo: assignedTo,
+        source: String(data[i][3] || 'student'),
+        title: String(data[i][4] || ''),
+        body: String(data[i][5] || ''),
+        triggerAt: tDate ? tDate.toISOString() : '',
+        linkedTaskId: String(data[i][7] || ''),
+        subject: String(data[i][8] || ''),
+        createdAt: data[i][10] ? new Date(data[i][10]).toISOString() : '',
+        isMine: String(data[i][1] || '') === u.email,
+        isRipe: isRipe
+      });
+    }
+    out.sort(function(a, b) {
+      if (a.isRipe && !b.isRipe) return -1;
+      if (!a.isRipe && b.isRipe) return 1;
+      var aT = a.triggerAt ? new Date(a.triggerAt).getTime() : 0;
+      var bT = b.triggerAt ? new Date(b.triggerAt).getTime() : 0;
+      if (a.isRipe) return bT - aT;
+      return aT - bT;
+    });
+    return {success: true, reminders: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), reminders: []};
+  }
+}
+
+function addMyReminder(title, body, triggerAt, linkedTaskId, subject) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, error: 'Not authenticated'};
+    if (!title || !String(title).trim()) return {success: false, error: 'Title required'};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false, error: 'Reminders sheet missing - run Repair Missing Sheets'};
+    var trig = triggerAt ? new Date(triggerAt) : new Date();
+    var id = generateId();
+    sheet.appendRow([
+      id, u.email, u.email, 'student',
+      String(title), String(body || ''),
+      trig, String(linkedTaskId || ''), String(subject || ''),
+      '[]', new Date().toISOString()
+    ]);
+    return {success: true, id: id};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function dismissReminder(id) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        var dismissed = [];
+        try { dismissed = JSON.parse(data[i][9] || '[]'); } catch(e) {}
+        if (dismissed.indexOf(u.email) === -1) {
+          dismissed.push(u.email);
+          sheet.getRange(i + 1, 10).setValue(JSON.stringify(dismissed));
+        }
+        return {success: true};
+      }
+    }
+    return {success: false, error: 'Not found'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function deleteReminder(id) {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        var creator = String(data[i][1] || '');
+        if (creator !== u.email && u.realRole !== 'teacher') {
+          return {success: false, error: 'Not authorized'};
+        }
+        sheet.deleteRow(i + 1);
+        return {success: true};
+      }
+    }
+    return {success: false, error: 'Not found'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function pushReminder(targetType, targetValue, title, body, triggerAt, subject) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    if (!title || !String(title).trim()) return {success: false, error: 'Title required'};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false, error: 'Reminders sheet missing'};
+    var assignedTo = '';
+    if (targetType === 'all') assignedTo = 'all';
+    else if (targetType === 'group') assignedTo = String(targetValue || '');
+    else if (targetType === 'individual') assignedTo = String(targetValue || '');
+    if (!assignedTo) return {success: false, error: 'Pick a target'};
+    var trig = triggerAt ? new Date(triggerAt) : new Date();
+    var id = generateId();
+    sheet.appendRow([
+      id, u.email, assignedTo, 'teacher',
+      String(title), String(body || ''),
+      trig, '', String(subject || ''),
+      '[]', new Date().toISOString()
+    ]);
+    return {success: true, id: id};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function sendSchoolReminder(title, body, triggerAt) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    if (!title || !String(title).trim()) return {success: false, error: 'Title required'};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false, error: 'Reminders sheet missing'};
+    var trig = triggerAt ? new Date(triggerAt) : new Date();
+    var id = generateId();
+    sheet.appendRow([
+      id, u.email, 'all', 'admin',
+      String(title), String(body || ''),
+      trig, '', '',
+      '[]', new Date().toISOString()
+    ]);
+    return {success: true, id: id};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function getMyCreatedReminders() {
+  try {
+    var u = getCurrentUser();
+    if (u.error) return {success: false, reminders: []};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: true, reminders: []};
+    var data = sheet.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      if (String(data[i][1]) !== u.email) continue;
+      out.push({
+        id: String(data[i][0]),
+        assignedTo: String(data[i][2] || ''),
+        source: String(data[i][3] || ''),
+        title: String(data[i][4] || ''),
+        body: String(data[i][5] || ''),
+        triggerAt: data[i][6] ? new Date(data[i][6]).toISOString() : '',
+        createdAt: data[i][10] ? new Date(data[i][10]).toISOString() : ''
+      });
+    }
+    out.sort(function(a, b) {
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+    return {success: true, reminders: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), reminders: []};
   }
 }

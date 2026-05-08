@@ -1,0 +1,227 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_dragdrop.html — DRAG-AND-DROP TILE REORDERING
+   ║  ────────────────────────────────────────────────────
+   ║  Wires up HTML5 drag-and-drop on every .tile element so users can
+   ║  reorder widgets by dragging them around the grid. Persists the new
+   ║  order to prefs and re-renders the affected grid.
+   ║
+   ║  Three grids are supported, distinguished by their parent's ID:
+   ║    #t-tile-grid → teacher dashboard (prefs.teacherTileOrder)
+   ║    #a-tile-grid → admin tab          (prefs.adminTileOrder)
+   ║    (anything else) → home page       (prefs.tileOrder)
+   ║
+   ║  Auto-scrolls the page when dragging near the top or bottom edge.
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. STATE (drag source + scroll animation handle)
+   ║   2. AUTO-SCROLL DURING DRAG (_dragScroll, _stopDragScroll)
+   ║   3. INITIALIZATION (initDragDrop — wires every .tile)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. STATE
+   dragSrc holds the tile being dragged (set in dragstart, cleared in dragend).
+   _scrollRaf holds the active requestAnimationFrame ID for auto-scroll
+   so we can cancel it cleanly.
+   ═══════════════════════════════════════════════════════════════════ */
+var dragSrc = null;
+var _scrollRaf = null;
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. AUTO-SCROLL DURING DRAG
+   When a user drags a tile near the top or bottom of the viewport, the
+   page scrolls automatically so they can drop on tiles outside the
+   currently-visible area. Speed scales with how close to the edge.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// While dragging, scroll the page if the cursor is within `zone` px of
+// the top or bottom edge. Re-uses a single rAF chain so multiple
+// dragover events don't stack scroll animations.
+function _dragScroll(e){
+  var zone = 64;             // matches topbar height — leaves a hot zone above the visible content
+  var y    = e.clientY;
+  var wh   = window.innerHeight;
+  if (_scrollRaf) cancelAnimationFrame(_scrollRaf);
+
+  if (y < zone){
+    // Scroll up — speed is faster the closer to the top edge
+    var speed = Math.round((zone - y) / zone * 18);
+    (function tick(){
+      _scrollRaf = requestAnimationFrame(function(){ window.scrollBy(0, -speed); tick(); });
+    })();
+  } else if (y > wh - zone){
+    // Scroll down — speed is faster the closer to the bottom edge
+    var speed = Math.round((y - (wh - zone)) / zone * 18);
+    (function tick(){
+      _scrollRaf = requestAnimationFrame(function(){ window.scrollBy(0, speed); tick(); });
+    })();
+  }
+}
+
+// Cancel any in-flight auto-scroll animation. Safe to call when none is running.
+function _stopDragScroll(){
+  if (_scrollRaf){
+    cancelAnimationFrame(_scrollRaf);
+    _scrollRaf = null;
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. INITIALIZATION
+   initDragDrop is called by buildTeacherDashboard / buildAdminPage /
+   renderTileGrid (home) every time a grid renders. It walks every
+   .tile and wires up the 5 drag events, marking each with a data flag
+   so it can be called repeatedly without double-binding.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Wire up drag-and-drop on every .tile in the document.
+// Idempotent: tiles with data-drag-init="1" are skipped so re-entry is safe.
+function initDragDrop(){
+  // Clicking these elements should NOT initiate a drag — we let them
+  // handle their own clicks/typing instead.
+  var NODRAG = 'input,textarea,button,a,select,.tile-sz-btn,.tile-style-btn,.tile-gear,.style-pop,.sz-pop,.min-btn,.face-back';
+
+  document.querySelectorAll('.tile').forEach(function(tile){
+    // Skip tiles we've already wired
+    if (tile.dataset.dragInit === '1') return;
+    tile.dataset.dragInit = '1';
+    tile.setAttribute('draggable', 'true');
+
+    // ── dragstart ────────────────────────────────────────────────
+    // Fired when the user starts dragging the tile. Cancels the drag
+    // if the tile is currently flipped (showing its back) or if the
+    // user is interacting with a NODRAG child.
+    tile.addEventListener('dragstart', function(e){
+      if (tile.classList.contains('flipped')){ e.preventDefault(); return; }
+      if (e.target.closest && e.target.closest(NODRAG)){ e.preventDefault(); return; }
+      dragSrc = tile;
+      tile.classList.add('dragging');
+      try {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', tile.dataset.tile);
+      } catch(err){}
+    });
+
+    // ── dragend ──────────────────────────────────────────────────
+    // Always fires when the drag ends (drop or cancel). Clean up state.
+    tile.addEventListener('dragend', function(){
+      tile.classList.remove('dragging');
+      document.querySelectorAll('.tile').forEach(function(t){ t.classList.remove('drag-over'); });
+      dragSrc = null;
+      _stopDragScroll();
+    });
+
+    // ── dragover ─────────────────────────────────────────────────
+    // Fires continuously while a tile is dragged over this one.
+    // Highlights it as the drop target and drives auto-scroll.
+    // Only allows drops within the same grid (parentNode check).
+    tile.addEventListener('dragover', function(e){
+      if (!dragSrc || dragSrc === tile) return;
+      if (dragSrc.parentNode !== tile.parentNode) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      // Clear highlights from any other tile, then highlight this one
+      document.querySelectorAll('.tile').forEach(function(t){ if (t !== tile) t.classList.remove('drag-over'); });
+      tile.classList.add('drag-over');
+      _dragScroll(e);
+    });
+
+    // ── dragleave ────────────────────────────────────────────────
+    // Remove the highlight when the cursor leaves this tile (but ignore
+    // moves between this tile and its own children — relatedTarget check).
+    tile.addEventListener('dragleave', function(e){
+      if (!tile.contains(e.relatedTarget)) tile.classList.remove('drag-over');
+    });
+
+    // ── drop ─────────────────────────────────────────────────────
+    // The actual reorder. Branches by grid: teacher / admin / home.
+    // Each branch updates the corresponding pref array, persists, and
+    // re-renders the grid.
+    tile.addEventListener('drop', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      tile.classList.remove('drag-over');
+      _stopDragScroll();
+
+      if (!dragSrc || dragSrc === tile) return;
+      if (dragSrc.parentNode !== tile.parentNode) return;
+
+      var gridId = tile.parentNode && tile.parentNode.id;
+      var srcId  = dragSrc.dataset.tile;
+      var dstId  = tile.dataset.tile;
+
+      // ── Branch 1: TEACHER GRID ───────────────────────
+      if (gridId === 't-tile-grid'){
+        var to = (prefs.teacherTileOrder || []).slice();
+        var fi = to.indexOf(srcId); if (fi > -1) to.splice(fi, 1);
+        var ti = to.indexOf(dstId); if (ti > -1) to.splice(ti, 0, srcId); else to.push(srcId);
+        prefs.teacherTileOrder = to;
+        buildTeacherDashboard();
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+        toast('Layout saved', 'inf');
+        return;
+      }
+
+      // ── Branch 2: ADMIN GRID ─────────────────────────
+      if (gridId === 'a-tile-grid'){
+        var ao = (prefs.adminTileOrder || []).slice();
+        var fi = ao.indexOf(srcId); if (fi > -1) ao.splice(fi, 1);
+        var ti = ao.indexOf(dstId); if (ti > -1) ao.splice(ti, 0, srcId); else ao.push(srcId);
+        prefs.adminTileOrder = ao;
+        buildAdminPage();
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+        toast('Layout saved', 'inf');
+        return;
+      }
+
+      // ── Branch 3: HOME GRID (default) ────────────────
+      // Save loaded data first so renderTileGrid (which rebuilds the
+      // home grid from scratch) doesn't lose it. Then restore and
+      // re-render each home widget so they reattach their event handlers.
+      var o  = (prefs.tileOrder || []).slice();
+      var fi = o.indexOf(srcId); if (fi > -1) o.splice(fi, 1);
+      var ti = o.indexOf(dstId); if (ti > -1) o.splice(ti, 0, srcId); else o.push(srcId);
+      prefs.tileOrder = o;
+
+      // Snapshot data before re-render
+      var sv = {
+        tasks:     myTasks.slice(),
+        links:     myLinks.slice(),
+        sched:     mySchedule.slice(),
+        notes:     myNotes,
+        notesData: Object.assign({}, myNotesData)
+      };
+      renderTileGrid();
+      // Restore data and re-render the widgets that need it
+      myTasks     = sv.tasks;
+      myLinks     = sv.links;
+      mySchedule  = sv.sched;
+      myNotes     = sv.notes;
+      myNotesData = sv.notesData || {};
+      renderTasks();
+      renderSchedule();
+      renderLinks();
+      renderCountdowns();
+      renderNotesWidget();
+      // Weather only refetches if the widget is currently active
+      if (prefs.tileOrder.indexOf('weather') > -1) loadWeather();
+
+      google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      toast('Layout saved', 'inf');
+    });
+  });
+
+  // Stop auto-scrolling if the user drags out of the document entirely
+  // (relatedTarget is null when leaving the window). Passive listener
+  // since we never preventDefault here.
+  document.addEventListener('dragleave', function(e){
+    if (!e.relatedTarget) _stopDragScroll();
+  }, {passive:true});
+}
+
+</script>

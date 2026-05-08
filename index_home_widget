@@ -1,0 +1,3308 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_home_widgets.html — HOME PAGE WIDGETS CHUNK
+   ║  ────────────────────────────────────────────────
+   ║  Owns the entire Home tab: tile grid, all widget HTML registries
+   ║  (front and back faces), per-widget data loading and rendering,
+   ║  flip-card interactions, and home data prefetch.
+   ║
+   ║  This is the biggest chunk in the app. Functions are grouped by
+   ║  the widget they belong to; shared infrastructure (tile grid,
+   ║  flip mechanism, registries) lives at the top.
+   ║
+   ║  ─── KNOWN PRE-EXISTING ISSUES (flagged, NOT fixed in this pass) ───
+   ║    • renderLinks() is defined TWICE. The second definition is a
+   ║      copy of renderNotesWidget() and shadows the first one (JS
+   ║      function-declaration hoisting — last wins). See section 24.
+   ║    • flipAddCustomCol / flipDelCustomCol are also defined in
+   ║      index_settings.html. Last load wins.
+   ║    • openSchedEditor / addSchedRow / saveSchedule appear to be
+   ║      legacy dead code (use orphan element IDs `se-ov`/`se-rows`).
+   ║      See section 13.
+   ║
+   ║  TABLE OF CONTENTS (parts 1, 2, 3)
+   ║  ─────────────────
+   ║   PART 1
+   ║    1. PAGE BUILDER (buildHomePage)
+   ║    2. TILE GRID RENDERER (renderTileGrid + sync)
+   ║    3. TILE SIZE PICKER (openSzPicker, pickSz)
+   ║    4. RELOAD HELPER (reloadHomeWidgets)
+   ║    5. WIDGET_HTML REGISTRY (front-face HTML for every widget)
+   ║    6. WIDGET DEFINITIONS (ALL_WIDGETS, DEF_TILE_SIZES)
+   ║    7. TILE INTERACTIONS (flip, unflip, minimize, apply styles)
+   ║   PART 2
+   ║    8. WIDGET_BACK REGISTRY + HAS_EDIT_TAB
+   ║    9. FLIP MECHANISM (flipWidget, buildBackPanel, switchBackTab)
+   ║   10. EMBED DOC RENDERER + DOC URL HELPERS
+   ║   11. SCHEDULE WIDGET — all handlers
+   ║   12. TASKS WIDGET — all handlers
+   ║   PART 3
+   ║   13. NOTES WIDGET
+   ║   14. TASK + NOTE TAB BARS (shared tab helpers)
+   ║   15. LINKS WIDGET (note: contains the duplicate renderLinks)
+   ║   16. WEATHER WIDGET
+   ║   17. QUOTE WIDGET
+   ║   18. TIMER WIDGET
+   ║   19. SEARCH WIDGET
+   ║   20. SPOTIFY WIDGET
+   ║   21. STOCKS WIDGET
+   ║   22. COUNTDOWNS WIDGET
+   ║   23. LUNCH WIDGET
+   ║   24. SCORES WIDGET
+   ║   25. SUBJECT HELPERS (color, options, dropdown builder)
+   ║   26. DATE/TIME HELPERS (_ymdLocal, _fmtTimeLocal)
+   ║   27. CALENDAR INTEGRATION (findClassTimesForSubject, openCalendarEvent)
+   ║   28. HOME DATA LOAD (loadHomeData, refreshScheduleData)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. PAGE BUILDER
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Build the Home tab. Teachers see it under #my-home, students under #home.
+// Lays out an empty tile grid, then renders tiles. If home data was already
+// loaded (warm path), re-renders directly; otherwise kicks off the load.
+function buildHomePage(){
+  var pid = CU.role === 'teacher' ? 'my-home' : 'home';
+  panel(pid).innerHTML = '<div class="tile-grid" id="tile-grid"></div>';
+  renderTileGrid();
+  if (homeDataLoaded){
+    renderTasks();
+    renderSchedule();
+    renderLinks();
+    renderCountdowns();
+    renderNotesWidget();
+  } else {
+    loadHomeData();
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. TILE GRID RENDERER
+   Walks prefs.tileOrder and emits one .tile per id. Each tile has a
+   minimize bar, a gear (opens flip-back), and a card-shell with a
+   front face (WIDGET_HTML[id]()) and a back face (filled lazily by
+   flipWidget / flipToCustomize). Wires up the notes auto-save handler
+   here too because that's the only widget with a textarea on the front.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render every tile in prefs.tileOrder into #tile-grid. Triggers any
+// per-widget loaders that need to fire after the shells are on screen
+// (timer, weather, lunch, scores, etc.). Wires the notes auto-save.
+function renderTileGrid(){
+  var grid = document.getElementById('tile-grid');
+  if (!grid) return;
+  var order = prefs.tileOrder || ['clock','tasks','notes','links'];
+
+  grid.innerHTML = order.map(function(id){
+    // Resolve the front-face HTML — embed widgets are looked up by their docId,
+    // everything else comes from the WIDGET_HTML registry.
+    var wh = '';
+    try {
+      if (id.startsWith('embed-')){ wh = renderEmbedWidgetHTML(id); }
+      else { wh = WIDGET_HTML[id] ? WIDGET_HTML[id]() : ''; }
+    } catch(e){
+      wh = '<div class="card"><div style="color:#ef4444;font-size:12px;">Widget error: ' + e.message + '</div></div>';
+    }
+
+    var isMin = prefs.minimizedWidgets && prefs.minimizedWidgets.indexOf(id) > -1;
+
+    // Resolve a label for the minimize-bar — embed widgets use the doc title,
+    // everything else uses the ALL_WIDGETS entry.
+    var wlabel;
+    if (id.startsWith('embed-')){
+      var _ed = null;
+      for (var _ei = 0; _ei < myEmbeddedDocs.length; _ei++){
+        if (myEmbeddedDocs[_ei].id === id.replace('embed-','')) _ed = myEmbeddedDocs[_ei];
+      }
+      wlabel = '&#128203; ' + (_ed ? esc(_ed.title) : 'Document');
+    } else {
+      var wdef = null;
+      for (var wi = 0; wi < ALL_WIDGETS.length; wi++){
+        if (ALL_WIDGETS[wi].id === id){ wdef = ALL_WIDGETS[wi]; break; }
+      }
+      wlabel = wdef ? wdef.icon + ' ' + wdef.name : id;
+    }
+
+    // Resolve size — clamp cols 1..4, rows 1..3. minHeight tracks rowSpan.
+    var defSz   = id.startsWith('embed-') ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+    var sz      = Object.assign({}, defSz || {c:2, r:1}, (prefs.tileSizes && prefs.tileSizes[id]) || {});
+    var colSpan = Math.min(Math.max(sz.c || 2, 1), 4);
+    var rowSpan = Math.min(Math.max(sz.r || 1, 1), 3);
+    var minH    = (rowSpan * 160) + ((rowSpan - 1) * 14);
+
+    return '<div class="tile' + (isMin ? ' minimized' : '') + '" id="tile-' + id + '" draggable="true" data-tile="' + id
+      + '" style="grid-column:span ' + colSpan + ';grid-row:span ' + rowSpan + ';min-height:' + minH + 'px;">'
+      + '<div class="tile-min-bar" onclick="toggleMinimize(\'' + id + '\')">' + wlabel + '</div>'
+      + '<div class="min-btn" onclick="toggleMinimize(\'' + id + '\')" title="' + (isMin ? 'Expand' : 'Collapse') + '"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (isMin ? '<path d="M3 10l5-5 5 5"/>' : '<path d="M3 6l5 5 5-5"/>') + '</svg></div>'
+      + '<div class="tile-gear" onclick="flipToCustomize(\'' + id + '\')" title="Widget settings"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2"/><path d="M8 2v1.5M8 12.5V14M14 8h-1.5M3.5 8H2M12.2 3.8l-1 1M4.8 11.2l-1 1M12.2 12.2l-1-1M4.8 4.8l-1-1"/></svg></div>'
+      + '<div class="card-shell">'
+      +   '<div class="face face-front">' + wh + '</div>'
+      +   '<div class="face face-back" id="tb-' + id + '"></div>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+
+  // Per-widget post-render kickoffs — only fire for widgets that exist on this page
+  if (order.indexOf('quote')        > -1) newQuote();
+  if (order.indexOf('timer')        > -1) renderTimerBody();
+  if (order.indexOf('weather')      > -1) loadWeather();
+  if (order.indexOf('countdowns')   > -1) renderCountdowns();
+  if (order.indexOf('lunch')        > -1) loadLunchMenu();
+  if (order.indexOf('scores')       > -1) setTimeout(renderScoresChart, 80); // wait for layout
+  if (order.indexOf('rowbank')      > -1) loadMyRows();
+  if (order.indexOf('rowapprovals') > -1) loadRowApprovals();
+  if (order.indexOf('reminders')    > -1) loadReminders();
+
+  // Notes textarea auto-save — debounced 900ms; updates current tab's data,
+  // serializes the whole tab map, and posts to saveMyNotes.
+  var ta = document.getElementById('notes-ta');
+  if (ta) ta.addEventListener('input', function(){
+    clearTimeout(notesTimer);
+    var lbl = document.getElementById('save-lbl');
+    if (lbl) lbl.textContent = 'Saving...';
+    notesTimer = setTimeout(function(){
+      var activeTab = prefs.notesActiveTab || 'default';
+      myNotesData[activeTab] = ta.value;
+      myNotes = serializeNotesData(myNotesData);
+      google.script.run.withSuccessHandler(function(){
+        var l = document.getElementById('save-lbl');
+        if (l){ l.textContent = 'Saved'; setTimeout(function(){ if (l) l.textContent = ''; }, 2000); }
+      }).saveMyNotes(myNotes);
+    }, 900);
+  });
+
+  applyAllWidgetStyles();
+  initDragDrop();
+}
+
+// Reconcile embed tiles against the current myEmbeddedDocs list. Removes
+// embed tiles whose docs no longer exist; intentionally does NOT auto-add
+// new ones (the user picks them via the "+ Add Widgets" picker).
+function syncEmbedTiles(){
+  var validIds = myEmbeddedDocs.map(function(d){ return 'embed-' + d.id; });
+  var before = JSON.stringify(prefs.tileOrder);
+  prefs.tileOrder = prefs.tileOrder.filter(function(t){
+    return !t.startsWith('embed-') || validIds.indexOf(t) > -1;
+  });
+  if (JSON.stringify(prefs.tileOrder) !== before){
+    google.script.run.saveMyPrefs(JSON.stringify(prefs));
+    reloadHomeWidgets();
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. TILE SIZE PICKER
+   Floating popup over the gear icon with a 4×2 grid of size choices.
+   Anchored to the tile's bottom-right corner with viewport clamping.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the size picker for a home tile. Clicking the same gear twice
+// closes the popup. Click outside also closes.
+function openSzPicker(id, evt){
+  evt.stopPropagation();
+  var old = document.getElementById('sz-pop');
+  if (old){ old.remove(); if (old.dataset.wid === id) return; }
+
+  var cur = Object.assign({}, DEF_TILE_SIZES[id] || {c:2, r:1}, (prefs.tileSizes && prefs.tileSizes[id]) || {});
+
+  var pop = document.createElement('div');
+  pop.id = 'sz-pop';
+  pop.dataset.wid = id;
+  pop.className = 'sz-pop';
+  var html = '<div class="sz-pop-title">Size (cols \u00d7 rows)</div><div class="sz-grid">';
+  for (var r = 1; r <= 2; r++){
+    for (var c = 1; c <= 4; c++){
+      var isSel = (c === cur.c && r === cur.r) ? ' sel' : '';
+      html += '<div class="sz-cell' + isSel + '" onclick="pickSz(\'' + id + '\',' + c + ',' + r + ')">' + c + '\u00d7' + r + '</div>';
+    }
+  }
+  html += '</div>';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+
+  // Anchor to the tile's bottom-right corner, clamped to viewport
+  var tile  = document.getElementById('tile-' + id);
+  var tRect = tile ? tile.getBoundingClientRect() : {top:100, bottom:300, left:100, right:400};
+  var popW = 215, popH = 152;
+  var left = tRect.right - popW - 14;
+  var top  = tRect.bottom - popH - 44;
+  if (left < tRect.left + 8) left = tRect.left + 8;
+  if (top  < tRect.top  + 8) top  = tRect.top  + 8;
+  if (left + popW > window.innerWidth  - 8) left = window.innerWidth  - popW - 8;
+  if (top  + popH > window.innerHeight - 8) top  = window.innerHeight - popH - 8;
+  if (left < 8) left = 8;
+  if (top  < 8) top  = 8;
+  pop.style.top  = top  + 'px';
+  pop.style.left = left + 'px';
+
+  // Click-outside-to-close
+  setTimeout(function(){
+    function away(e){ if (!pop.contains(e.target)){ pop.remove(); document.removeEventListener('click', away); } }
+    document.addEventListener('click', away);
+  }, 10);
+}
+
+// Apply a picked size — update prefs, mutate the tile's grid spans in
+// place (avoids a full re-render), and sync the size grid inside the
+// flipped style panel if it's currently open.
+function pickSz(id, cols, rows){
+  if (!prefs.tileSizes) prefs.tileSizes = {};
+  prefs.tileSizes[id] = {c:cols, r:rows};
+
+  var tile = document.getElementById('tile-' + id);
+  if (tile){
+    var minH = (rows * 160) + ((rows - 1) * 14);
+    tile.style.gridColumn = 'span ' + cols;
+    tile.style.gridRow    = 'span ' + rows;
+    tile.style.minHeight  = minH + 'px';
+  }
+
+  var pop = document.getElementById('sz-pop');
+  if (pop) pop.remove();
+
+  // Sync the size grid inside the back panel so the highlight stays consistent
+  var back = document.getElementById('tb-' + id);
+  if (back && back.querySelector('.style-sz-grid')){
+    back.querySelectorAll('.style-sz-cell').forEach(function(el){ el.classList.remove('sel'); });
+    back.querySelectorAll('.style-sz-cell').forEach(function(el){
+      if (el.textContent === cols + '\u00d7' + rows) el.classList.add('sel');
+    });
+  }
+
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. RELOAD HELPER
+   Re-render the home tile grid while preserving the in-memory data so
+   widgets re-attach their handlers without losing state.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Re-render the entire home grid — used after layout changes (drag-drop,
+// add/remove widget, theme change). Snapshot data first because
+// renderTileGrid rebuilds from scratch and would lose mid-edit values.
+function reloadHomeWidgets(){
+  var hp = document.getElementById('tp-home') || document.getElementById('tp-my-home');
+  if (!hp) return;
+
+  // Snapshot before re-render
+  var sv = {
+    tasks:     myTasks.slice(),
+    links:     myLinks.slice(),
+    sched:     mySchedule.slice(),
+    notes:     myNotes,
+    notesData: Object.assign({}, myNotesData)
+  };
+
+  renderTileGrid();
+
+  // Restore + re-render widgets that need it
+  myTasks     = sv.tasks;
+  myLinks     = sv.links;
+  mySchedule  = sv.sched;
+  myNotes     = sv.notes;
+  myNotesData = sv.notesData || {};
+
+  renderTasks();
+  renderSchedule();
+  renderLinks();
+  renderCountdowns();
+  renderNotesWidget();
+  if (prefs.tileOrder.indexOf('weather') > -1) loadWeather();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. WIDGET_HTML REGISTRY
+   The front-face HTML factory for every widget. Each function returns
+   an HTML string that gets injected into a tile's .face-front div.
+   These are PURE markup — no event listeners are attached here. Inline
+   onclick handlers wire up to global functions further down the file.
+   ═══════════════════════════════════════════════════════════════════ */
+
+var WIDGET_HTML = {
+  // ── CLOCK ── 4 styles: digital, analog, minimal, word.
+  // Time text is filled later by tickClock (defined in another chunk).
+  clock: function(){
+    var s   = prefs.clockStyle || 'digital';
+    var now = new Date();
+    var d   = DAYS[now.getDay()].toUpperCase();
+    var dt  = MONTHS[now.getMonth()] + ' ' + now.getDate() + ', ' + now.getFullYear();
+    var ds  = MONTHS[now.getMonth()] + ' ' + now.getDate();
+    var inn = '';
+    if (s === 'digital')      inn = '<div class="clock-card clk-digital"><div class="clk-day">' + d + '</div><div class="clk-time" id="clk-main">--:--:--</div><div class="clk-date">' + dt + '</div></div>';
+    else if (s === 'analog')  inn = '<div class="clock-card"><div style="text-align:center;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--a1);margin-bottom:8px;">' + d + '</div><div class="clk-analog"><svg id="analog-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="160" height="160"></svg></div><div style="color:var(--tx3);font-size:13px;text-align:center;margin-top:8px;">' + ds + '</div></div>';
+    else if (s === 'minimal') inn = '<div class="clock-card clk-minimal"><div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--a1);margin-bottom:10px;">' + d + '</div><div class="clk-time" id="clk-main">--</div><div class="clk-date">' + dt + '</div></div>';
+    else if (s === 'word')    inn = '<div class="clock-card"><div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--a1);margin-bottom:14px;">' + d + ' — ' + ds + '</div><div class="clk-word" id="clk-main"></div></div>';
+    return '<div style="padding:0;background:transparent;border:none;height:100%;display:flex;flex-direction:column;">' + inn + '</div>';
+  },
+
+  // ── SCHEDULE ── delegates to schedCard helper
+  schedule: function(){ return schedCard(); },
+
+  // ── TASKS ── header with sort dropdown + add button, then tab bar
+  // and task area. Sort options sync to prefs.taskSort.
+  tasks: function(){
+    var sortOpts = [['default','Priority'], ['duedate','Due Date'], ['subject','Subject'], ['dateadded','Date Added'], ['alpha','A–Z']];
+    var curSort  = prefs.taskSort || 'default';
+    var selHtml  = sortOpts.map(function(o){ return '<option value="' + o[0] + '"' + (curSort === o[0] ? ' selected' : '') + '>Sort: ' + o[1] + '</option>'; }).join('');
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-todo"/></svg> To-Do List</div><div style="display:flex;gap:5px;align-items:center;"><select class="fsel" onchange="setTaskSort(this.value)" style="font-size:11px;padding:4px 8px;width:auto;">' + selHtml + '</select><button class="btn btn-primary btn-sm" onclick="flipWidget(\'tasks\')" title="Add task" style="padding:4px 10px;font-size:11px;">+ Add</button></div></div><div class="wtab-bar" id="task-tab-bar"></div><div id="task-area"><div class="empty"><p>All clear!</p></div></div></div>';
+  },
+
+  // ── NOTES ── textarea + tab bar, autosaves on input
+  notes: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-notes"/></svg> Notes</div><span class="save-lbl" id="save-lbl"></span></div><div class="wtab-bar" id="notes-tab-bar"></div><textarea id="notes-ta" placeholder="Jot anything here..."></textarea></div>';
+  },
+
+  // ── LINKS ── empty container; populated by renderLinks
+  links: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-link"/></svg> My Links</div></div><div id="links-area"><div class="empty"><p>No links yet.</p></div></div></div>';
+  },
+
+  // ── COUNTDOWNS ── empty container; populated by renderCountdowns
+  countdowns: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-countdown"/></svg> Countdowns</div></div><div id="cd-area"><div class="empty"><p>No countdowns yet.</p></div></div></div>';
+  },
+
+  // ── WEATHER ── view-switcher tabs (today/5day/10day) + loading shell
+  weather: function(){
+    var vw = prefs.weatherView || 'today';
+    var vtabs = '<div style="display:flex;gap:4px;margin-bottom:10px;">'
+      + '<button class="btn btn-sm weather-vbtn ' + (vw === 'today' ? 'btn-primary' : 'btn-ghost') + '" data-view="today" onclick="setWeatherView(this.dataset.view)">Today</button>'
+      + '<button class="btn btn-sm weather-vbtn ' + (vw === '5day'  ? 'btn-primary' : 'btn-ghost') + '" data-view="5day"  onclick="setWeatherView(this.dataset.view)">5-Day</button>'
+      + '<button class="btn btn-sm weather-vbtn ' + (vw === '10day' ? 'btn-primary' : 'btn-ghost') + '" data-view="10day" onclick="setWeatherView(this.dataset.view)">10-Day</button>'
+      + '</div>';
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-weather"/></svg> Weather</div></div>' + vtabs + '<div id="weather-body">' + renderWeatherInit() + '</div></div>';
+  },
+
+  // ── QUOTE ── populated by newQuote() on render
+  quote: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-quote"/></svg> Daily Quote</div><button class="btn btn-ghost btn-sm" onclick="newQuote()">New</button></div><div id="quote-body" class="quote-body"></div></div>';
+  },
+
+  // ── TIMER ── two-tab (countdown + stopwatch); body filled by renderTimerBody
+  timer: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-timer"/></svg> Timer</div></div><div class="timer-tabs"><button class="timer-tab-btn active" id="tt-timer" onclick="setTimerMode(\'timer\')">Countdown</button><button class="timer-tab-btn" id="tt-sw" onclick="setTimerMode(\'stopwatch\')">Stopwatch</button></div><div id="timer-widget-body"></div></div>';
+  },
+
+  // ── SEARCH ── Google search input + quicklink shortcuts
+  search: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-search"/></svg> Google Search</div></div><div style="display:flex;gap:8px;margin-bottom:12px;"><input class="finp" id="gsearch-inp" placeholder="Search Google..." style="flex:1;" onkeydown="if(event.key===\'Enter\')doGSearch()"><button class="btn btn-primary" onclick="doGSearch()">Go</button></div><div style="display:flex;gap:6px;flex-wrap:wrap;"><a href="https://www.khanacademy.org" target="_blank" class="btn btn-ghost btn-sm">Khan Academy</a><a href="https://www.youtube.com" target="_blank" class="btn btn-ghost btn-sm">YouTube</a><a href="https://www.wikipedia.org" target="_blank" class="btn btn-ghost btn-sm">Wikipedia</a></div></div>';
+  },
+
+  // ── GAPPS ── 6 quicklinks to Google products
+  gapps: function(){
+    function gBtn(lbl, url){
+      return '<a href="' + url + '" target="_blank" style="display:flex;flex-direction:column;align-items:center;gap:5px;padding:14px 4px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;text-decoration:none;transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--a4)\'" onmouseout="this.style.borderColor=\'var(--border)\'"><span style="font-size:12px;font-weight:600;color:var(--tx2);">' + lbl + '</span></a>';
+    }
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-apps"/></svg> Google Apps</div></div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">'
+      + gBtn('Gmail',     'https://mail.google.com')
+      + gBtn('Drive',     'https://drive.google.com')
+      + gBtn('Classroom', 'https://classroom.google.com')
+      + gBtn('Calendar',  'https://calendar.google.com')
+      + gBtn('Docs',      'https://docs.google.com')
+      + gBtn('Sheets',    'https://sheets.google.com')
+      + '</div></div>';
+  },
+
+  // ── SPOTIFY ── embed iframe, or "Connect Spotify" CTA when not configured
+  spotify: function(){
+    var url = prefs.spotifyUrl || '';
+    var content;
+    if (url){
+      // Convert the share URL to an embed URL by inserting /embed and dropping query string
+      var em = url.replace('open.spotify.com/', 'open.spotify.com/embed/').split('?')[0];
+      content = '<iframe src="' + em + '?utm_source=generator&theme=0" width="100%" height="152" frameborder="0" allowtransparency="true" allow="autoplay;clipboard-write;encrypted-media;fullscreen;picture-in-picture" loading="lazy" style="border-radius:10px;display:block;"></iframe>';
+    } else {
+      content = '<div style="text-align:center;padding:18px;color:var(--tx3);"><p style="font-size:13px;margin-bottom:12px;">Paste a Spotify URL to embed a song or playlist.</p><button class="btn btn-primary" onclick="flipWidget(\'spotify\')">Connect Spotify</button></div>';
+    }
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-music"/></svg> Spotify</div></div>' + content + '</div>';
+  },
+
+  // ── STOCKS ── TradingView mini-chart iframe for the first symbol in prefs
+  stocks: function(){
+    var sym = (prefs.stockSymbols || 'AAPL').split(',')[0].trim().toUpperCase() || 'AAPL';
+    var src = 'https://www.tradingview.com/embed-widget/mini-symbol-overview/?symbol=' + encodeURIComponent(sym) + '&locale=en&dateRange=1M&colorTheme=dark&isTransparent=true&autosize=true';
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-stock"/></svg> Stock Chart</div></div><iframe src="' + src + '" width="100%" height="200" frameborder="0" style="border-radius:10px;display:block;" scrolling="no"></iframe></div>';
+  },
+
+  // ── SCORES ── Lexile chart placeholder; SVG drawn by renderScoresChart
+  scores: function(){
+    var data    = prefs.testingScores || {goal:null, entries:{}};
+    var goal    = data.goal ? Number(data.goal) : null;
+    var entries = data.entries || {};
+    var hasData = Object.keys(entries).length > 0;
+    var goalTag = goal ? '<span style="font-size:11px;color:var(--a2);background:var(--a5);border:1px solid var(--a4);border-radius:99px;padding:2px 9px;font-weight:600;">Goal: ' + goal + ' L</span>' : '';
+    return '<div class="card" style="display:flex;flex-direction:column;height:100%;">'
+      + '<div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-chart"/></svg> Lexile Scores</div>' + goalTag + '</div>'
+      + (hasData
+          ? '<div id="scores-chart" style="flex:1;min-height:0;overflow:hidden;"></div>'
+          : '<div id="scores-chart" style="flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;"><div class="empty"><p style="font-size:12px;">Click the gear to edit scores.</p></div></div>')
+      + '</div>';
+  },
+
+  // ── LUNCH ── tab bar + body, populated by buildLunchTabs / showLunchDay
+  lunch: function(){
+    return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-lunch"/></svg> Lunch Menu</div><button class="btn btn-ghost btn-sm" onclick="loadLunchMenu()" title="Refresh"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button></div><div class="lunch-day-tabs" id="lunch-tabs"></div><div id="lunch-body"><div class="lunch-empty">Loading menu...</div></div></div>';
+  },
+
+  // ── ROW BANK (student) ── balance display + request button + history
+  rowbank: function(){
+    return '<div class="card row-card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-rowoars"/></svg> My ROWs</div><button class="btn btn-ghost btn-sm" onclick="loadMyRows()" title="Refresh"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button></div><div class="row-balance-wrap"><div class="row-balance-lbl">Balance</div><div class="row-balance-num" id="row-bal-num">--</div><div class="row-balance-sub">ROW Rewards</div></div><div id="row-pending-area"></div><div class="row-actions"><button class="btn btn-primary" onclick="flipWidget(\'rowbank\')" id="row-req-btn">+ Request ROW</button></div><div class="row-history" id="row-hist-area"></div></div>';
+  },
+
+  // ── REMINDERS ── empty list shell; populated by loadReminders (other chunk)
+  reminders: function(){
+    return '<div class="card" style="display:flex;flex-direction:column;height:100%;"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-timer"/></svg> Reminders</div><div style="display:flex;gap:5px;"><button class="btn btn-ghost btn-sm" onclick="loadReminders()" title="Refresh"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button><button class="btn btn-primary btn-sm" onclick="flipWidget(\'reminders\')" style="font-size:11px;padding:4px 10px;">+ Add</button></div></div><div id="reminders-area" style="flex:1;min-height:0;overflow:hidden;"><div class="rem-empty">Loading...</div></div></div>';
+  },
+
+  // ── ROW APPROVALS (teacher) ── pending request list; populated by loadRowApprovals
+  rowapprovals: function(){
+    return '<div class="card" style="display:flex;flex-direction:column;height:100%;"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-rowoars"/></svg> ROW Approvals</div><div style="display:flex;gap:4px;"><button class="btn btn-ghost btn-sm" onclick="openRowHistoryModal()" title="View past approvals">History</button><button class="btn btn-ghost btn-sm" onclick="loadRowApprovals()" title="Refresh"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button></div></div><div id="row-approvals-body" style="flex:1;min-height:0;overflow:hidden;"><div class="empty"><p style="font-size:12px;">Loading...</p></div></div></div>';
+  }
+};
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. WIDGET DEFINITIONS
+   ALL_WIDGETS  — used by the "+ Add Widgets" picker (icon, name, desc)
+   DEF_TILE_SIZES — default cols/rows for each widget id (and 'embed'
+                    as a generic fallback for embedded doc widgets)
+   ═══════════════════════════════════════════════════════════════════ */
+
+var ALL_WIDGETS = [
+  {id:'clock',        icon:'&#128336;', name:'Clock',             desc:'Time and date display',                             isDefault:true},
+  {id:'schedule',     icon:'&#128203;', name:'Class Schedule',    desc:'Your daily class periods',                          isDefault:true},
+  {id:'tasks',        icon:'&#9989;',   name:'To-Do List',        desc:'Tasks and assignments',                             isDefault:true},
+  {id:'notes',        icon:'&#128221;', name:'Notes',             desc:'Freeform note area',                                isDefault:true},
+  {id:'links',        icon:'&#128279;', name:'My Links',          desc:'Quick access bookmarks',                            isDefault:true},
+  {id:'weather',      icon:'&#9925;',   name:'Weather',           desc:'Current conditions',                                isDefault:false},
+  {id:'quote',        icon:'&#10024;',  name:'Daily Quote',       desc:'Motivational quotes',                               isDefault:false},
+  {id:'timer',        icon:'&#9203;',   name:'Timer & Stopwatch', desc:'Countdown + stopwatch',                             isDefault:false},
+  {id:'countdowns',   icon:'&#127881;', name:'Countdowns',        desc:'Named day countdowns',                              isDefault:false},
+  {id:'search',       icon:'&#128269;', name:'Google Search',     desc:'Search opens in new tab',                           isDefault:false},
+  {id:'gapps',        icon:'&#128231;', name:'Google Apps',       desc:'Gmail, Drive, Classroom',                           isDefault:false},
+  {id:'spotify',      icon:'&#127925;', name:'Spotify',           desc:'Embedded music player',                             isDefault:false},
+  {id:'stocks',       icon:'&#128200;', name:'Stock Chart',       desc:'TradingView live chart',                            isDefault:false},
+  {id:'lunch',        icon:'&#127829;', name:'Lunch Menu',        desc:'Weekly school lunch menu',                          isDefault:false},
+  {id:'scores',       icon:'&#128200;', name:'Lexile Scores',     desc:'State testing score tracker',                       isDefault:false},
+  {id:'rowbank',      icon:'&#127942;', name:'My ROWs',           desc:'ROW Reward balance & requests',                     isDefault:false},
+  {id:'rowapprovals', icon:'&#10004;',  name:'ROW Approvals',     desc:'Pending student ROW requests',                      isDefault:false},
+  {id:'reminders',    icon:'&#9200;',   name:'Reminders',         desc:'Active reminders from teachers, school & you',      isDefault:false}
+];
+
+var DEF_TILE_SIZES = {
+  clock:        {c:2, r:1},
+  embed:        {c:2, r:2},
+  schedule:     {c:2, r:1},
+  tasks:        {c:2, r:2},
+  notes:        {c:2, r:1},
+  links:        {c:1, r:1},
+  weather:      {c:1, r:1},
+  quote:        {c:1, r:1},
+  timer:        {c:1, r:1},
+  search:       {c:2, r:1},
+  gapps:        {c:2, r:1},
+  spotify:      {c:2, r:1},
+  stocks:       {c:2, r:1},
+  countdowns:   {c:2, r:1},
+  lunch:        {c:2, r:1},
+  scores:       {c:2, r:2},
+  rowbank:      {c:2, r:2},
+  rowapprovals: {c:2, r:2},
+  reminders:    {c:2, r:2}
+};
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. TILE INTERACTIONS
+   Flip-to-style (gear icon), unflip, minimize toggle, and the wrapper
+   that re-applies all custom widget styles after a re-render.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// User clicked a tile's gear → flip to style/customize panel.
+// If the widget has both an Edit and Style tab, open Style by default.
+function flipToCustomize(id){
+  _flipMode[id] = 'style';
+  var tile = document.getElementById('tile-' + id);
+  if (!tile) return;
+  var back = document.getElementById('tb-' + id);
+  if (!back) return;
+  back.innerHTML = buildBackPanel(id, 'style');
+  tile.classList.add('flipped');
+  setTimeout(function(){ attachStyleListeners(id); }, 10);
+}
+
+// Flip the back face away — used by Cancel buttons everywhere.
+function unflipWidget(id){
+  var tile = document.getElementById('tile-' + id);
+  if (tile) tile.classList.remove('flipped');
+}
+
+// Toggle a widget's minimized state. Updates prefs, the tile's class,
+// and the chevron direction on the minimize button.
+function toggleMinimize(id){
+  if (!prefs.minimizedWidgets) prefs.minimizedWidgets = [];
+  var idx = prefs.minimizedWidgets.indexOf(id);
+  if (idx > -1) prefs.minimizedWidgets.splice(idx, 1);
+  else          prefs.minimizedWidgets.push(id);
+
+  var tile = document.getElementById('tile-' + id);
+  if (tile){
+    var isMin = prefs.minimizedWidgets.indexOf(id) > -1;
+    tile.classList.toggle('minimized', isMin);
+    // Update the chevron: down arrow when expanded, up when minimized
+    var btn = tile.querySelector('.min-btn');
+    if (btn){
+      btn.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (isMin ? '<path d="M3 10l5-5 5 5"/>' : '<path d="M3 6l5 5 5-5"/>') + '</svg>';
+      btn.title = isMin ? 'Expand' : 'Collapse';
+    }
+  }
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Re-apply per-widget custom styles after a re-render.
+function applyAllWidgetStyles(){
+  (prefs.tileOrder || []).forEach(function(id){ applyWidgetStyle(id); });
+}
+
+// ─── PART 1 ENDS HERE ───────────────────────────────────────────────
+// Continue reading? Sections 8–12 (WIDGET_BACK, flip mechanism,
+// embed renderer, schedule, tasks) come next.
+/* ═══════════════════════════════════════════════════════════════════
+   8. WIDGET_BACK REGISTRY + HAS_EDIT_TAB
+   The back-face HTML factory for every widget that has an Edit panel.
+   Keyed off the same widget id as WIDGET_HTML. HAS_EDIT_TAB tracks
+   which widgets actually have an Edit tab (vs. Style-only widgets
+   like Google Apps, Search, Quote, Lunch).
+   ═══════════════════════════════════════════════════════════════════ */
+
+var WIDGET_BACK = {
+  // ── WEATHER ── geolocate or manual city entry
+  weather: function(){
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="⛅">Weather Setup</div>'
+      + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="flipGeoLocate()">&#127759; Use My Location</button>'
+      + '<div style="text-align:center;font-size:11px;color:var(--tx3);">&mdash; or &mdash;</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">City Name</label><input class="finp" id="flip-w-city" placeholder="e.g. Grand Island, NE" onkeydown="if(event.key===\'Enter\')flipManualCity()"></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'weather\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipManualCity()">Get Weather</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── STOCKS ── single symbol entry (uses first if comma-separated)
+  stocks: function(){
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="📈">Stock Symbol</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Symbol</label>'
+      +   '<input class="finp" id="flip-stock-sym" placeholder="e.g. AAPL, TSLA" value="' + (prefs.stockSymbols || 'AAPL') + '" onkeydown="if(event.key===\'Enter\')flipSaveStocks()"></div>'
+      + '<div style="font-size:11px;color:var(--tx3);">Shows past-month price chart.</div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'stocks\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveStocks()">Save</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── SPOTIFY ── share-link entry with Clear option
+  spotify: function(){
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="🎵">Connect Spotify</div>'
+      + '<div style="font-size:11px;color:var(--tx3);line-height:1.6;">In Spotify: right-click a song &rarr; Share &rarr; Copy link.</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Spotify URL</label>'
+      +   '<input class="finp" id="flip-spot-url" placeholder="https://open.spotify.com/..." value="' + (prefs.spotifyUrl || '') + '" onkeydown="if(event.key===\'Enter\')flipSaveSpotify()"></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'spotify\')">Cancel</button>'
+      +   '<button class="btn btn-danger btn-sm" onclick="flipClearSpotify()">Clear</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveSpotify()">Save</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── COUNTDOWNS ── new countdown form (name + date + emoji picker)
+  countdowns: function(){
+    var emojiRow = CD_EMOJIS.map(function(e){ return '<div class="em-opt" onclick="pickCdEmoji(this)" data-em="' + e + '">' + e + '</div>'; }).join('');
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="🎉">New Countdown</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Name</label>'
+      +   '<input class="finp" id="flip-cd-name" placeholder="—Event Name—"></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Date</label>'
+      +   '<input type="date" class="finp" id="flip-cd-date"></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Emoji</label>'
+      +   '<div class="emoji-pick-row" id="flip-cd-emoji-row">' + emojiRow + '</div></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'countdowns\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveCd()">Add Countdown</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── TASKS ── two modes: 'add' (default — new task form), 'lists' (manage tabs)
+  // Mode is stored in _flipMode[id] and toggled by the tab bar's edit pencil.
+  tasks: function(){
+    var mode = _flipMode['tasks'] || 'add';
+
+    // ── 'lists' mode: per-list rows with color cycle + delete + add new ──
+    if (mode === 'lists'){
+      var lists = prefs.taskLists || [{id:'default', name:'All Tasks', color:'#6366f1'}];
+      var rows = lists.map(function(l){
+        return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">'
+          + '<div class="color-dot" data-id="' + l.id + '" data-color="' + l.color + '" style="background:' + l.color + ';" onclick="cycleColor(this)" title="Click to cycle color"></div>'
+          + '<input class="finp" id="tln-' + l.id + '" value="' + esc(l.name) + '" placeholder="List name" style="flex:1;font-size:12px;padding:5px 8px;">'
+          + (lists.length > 1 ? '<button class="btn btn-danger btn-sm" onclick="deleteTabInline(\'task\',\'' + l.id + '\')">&#10005;</button>' : '')
+          + '</div>';
+      }).join('');
+      return '<div class="flip-back-card">'
+        + '<div class="flip-back-title" data-emo="📋">Manage Lists</div>'
+        + '<div>' + rows + '</div>'
+        + '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
+        +   '<div style="font-size:10px;font-weight:600;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Add New List</div>'
+        +   '<div style="display:flex;gap:6px;"><input class="finp" id="new-list-name" placeholder="List name..." style="flex:1;font-size:12px;padding:5px 8px;"><button class="btn btn-primary btn-sm" onclick="addListInline()">Add</button></div>'
+        + '</div>'
+        + '<div class="flip-back-footer">'
+        +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'tasks\')">Cancel</button>'
+        +   '<button class="btn btn-primary" onclick="saveListsInline()">Save</button>'
+        + '</div></div>';
+    }
+
+    // ── 'add' mode: new task form (title, subject, priority, due date, calendar opt-in) ──
+    var priOpts  = ['high','medium','low'].map(function(p){ return '<option value="' + p + '"' + (p === 'medium' ? ' selected' : '') + '>' + p.charAt(0).toUpperCase() + p.slice(1) + '</option>'; }).join('');
+    var subjOpts = buildSubjectDropdownOptions('');
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="✅">Add Task</div>'
+      + '<div class="fg" style="margin:0"><label class="flbl">Title *</label><input class="finp" id="flip-task-title" placeholder="—Assignment Title—" onkeydown="if(event.key===\'Enter\')flipSaveTask()"></div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'
+      +   '<div><label class="flbl">Subject</label><select class="fsel" id="flip-task-subj">' + subjOpts + '</select></div>'
+      +   '<div><label class="flbl">Priority</label><select class="fsel" id="flip-task-pri">' + priOpts + '</select></div>'
+      + '</div>'
+      + '<div><label class="flbl">Due Date</label><input type="date" class="finp" id="flip-task-due"></div>'
+      + '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:12px;color:var(--tx2);"><input type="checkbox" id="flip-task-cal" style="accent-color:var(--a1);width:15px;height:15px;">Also add to my Google Calendar</label>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'tasks\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveTask()">Add Task</button>'
+      + '</div></div>';
+  },
+
+  // ── NOTES ── manage tabs (rename, recolor, delete) + add new tab
+  notes: function(){
+    var tabs = prefs.notesTabs || [{id:'default', name:'Notes', color:'#6366f1'}];
+    var rows = tabs.map(function(t){
+      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">'
+        + '<div class="color-dot" data-id="' + t.id + '" data-color="' + t.color + '" style="background:' + t.color + ';" onclick="cycleColor(this)" title="Click to cycle color"></div>'
+        + '<input class="finp" id="ntn-' + t.id + '" value="' + esc(t.name) + '" placeholder="—Tab Name—" style="flex:1;font-size:12px;padding:5px 8px;">'
+        + (tabs.length > 1 ? '<button class="btn btn-danger btn-sm" onclick="deleteTabInline(\'note\',\'' + t.id + '\')">&#10005;</button>' : '')
+        + '</div>';
+    }).join('');
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="📝">Manage Tabs</div>'
+      + '<div>' + rows + '</div>'
+      + '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
+      +   '<div style="font-size:10px;font-weight:600;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Add New Tab</div>'
+      +   '<div style="display:flex;gap:6px;"><input class="finp" id="new-tab-name" placeholder="—Tab Name—" style="flex:1;font-size:12px;padding:5px 8px;"><button class="btn btn-primary btn-sm" onclick="addNoteTabInline()">Add</button></div>'
+      + '</div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'notes\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="saveNoteTabsInline()">Save</button>'
+      + '</div></div>';
+  },
+
+  // ── LINKS ── label + URL form
+  links: function(){
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="🔗">Add Link</div>'
+      + '<div class="fg" style="margin:0"><label class="flbl">Label</label>'
+      +   '<input class="finp" id="flip-link-label" placeholder="—Link Label—"></div>'
+      + '<div><label class="flbl">URL</label>'
+      +   '<input class="finp" id="flip-link-url" placeholder="—URL—" onkeydown="if(event.key===\'Enter\')flipSaveLink()"></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'links\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveLink()">Save Link</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── SCORES ── Lexile entries (3 grades × 3 seasons) + goal
+  scores: function(){
+    var data    = prefs.testingScores || {goal:null, entries:{}};
+    var entries = data.entries || {};
+    var goal    = data.goal || '';
+    var GRADES  = ['6','7','8'];
+    var SEASONS = ['fall','winter','spring'];
+    var SLABELS = {fall:'Fall', winter:'Winter', spring:'Spring'};
+
+    // Build a 3-column input grid for each grade
+    var rows = '';
+    GRADES.forEach(function(g){
+      rows += '<div style="margin-bottom:14px;">'
+        + '<div style="font-size:10px;font-weight:700;color:var(--a2);letter-spacing:.6px;text-transform:uppercase;margin-bottom:7px;display:flex;align-items:center;gap:6px;">'
+        +   '<span style="background:var(--a3);border:1px solid var(--a4);border-radius:5px;padding:1px 7px;">' + g + 'th Grade</span></div>'
+        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">';
+      SEASONS.forEach(function(s){
+        var key = g + '-' + s;
+        var val = entries[key] || '';
+        rows += '<div>'
+          + '<label style="font-size:10px;font-weight:600;color:var(--tx3);display:block;margin-bottom:4px;letter-spacing:.3px;">' + SLABELS[s] + '</label>'
+          + '<input class="finp" type="number" id="sc-inp-' + key + '" value="' + val + '" placeholder="—" min="0" max="2000" style="font-size:12px;padding:5px 8px;text-align:center;">'
+          + '</div>';
+      });
+      rows += '</div></div>';
+    });
+
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="📊">Lexile Score Tracker</div>'
+      + '<div style="overflow-y:auto;flex:1;padding-right:2px;">'
+      +   '<div style="font-size:11px;color:var(--tx3);margin-bottom:12px;line-height:1.6;">Enter Lexile scores for each testing season. Leave blank to skip.</div>'
+      +   rows
+      +   '<div style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px;">'
+      +     '<label style="font-size:11px;font-weight:600;color:var(--tx2);display:block;margin-bottom:6px;">&#127945; Lexile Goal <span style="color:var(--tx4);font-weight:400;">(optional — dotted line on chart)</span></label>'
+      +     '<input class="finp" type="number" id="sc-goal" value="' + goal + '" placeholder="e.g. 1200" min="0" max="2000" style="width:150px;font-size:13px;">'
+      +   '</div></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'scores\')">Cancel</button>'
+      +   '<button class="btn btn-danger btn-sm" onclick="clearScores()">Clear All</button>'
+      +   '<button class="btn btn-primary" onclick="saveScores()">Save</button>'
+      + '</div></div>';
+  },
+
+  // ── SCHEDULE ── full editor: A-day rows, optional B-day sub-rows, custom columns,
+  // bell-schedule import, column visibility toggles. The biggest of all the back panels.
+  schedule: function(){
+    // Use existing schedule, or 7 empty rows for first-time setup
+    var rows = mySchedule.length ? mySchedule : (function(){
+      var r = [];
+      for (var i = 0; i < 7; i++) r.push({period:i+1, subject:'', teacher:'', room:'', startTime:'', endTime:'', abDay:false, subjectB:'', teacherB:'', roomB:''});
+      return r;
+    })();
+    var cols          = prefs.schedCols || ['period','subject','teacher','room','time'];
+    var hl            = prefs.schedHighlight !== false;
+    var hasBellActive = activeBell && activeBell.schedule;
+    var bellNote      = hasBellActive
+      ? '<div style="background:var(--a5);border:1px solid var(--a4);border-radius:8px;padding:8px 11px;margin-bottom:10px;font-size:11px;color:var(--tx2);line-height:1.5;"><strong style="color:var(--a2);">' + esc(activeBell.schedule.name) + '</strong> bell schedule is active today. Period times below are pulled from it; you can still override them per row.</div>'
+      : '';
+    var customCols = prefs.schedCustomCols || [];
+
+    // Build the row HTML — every period gets a main A-day row + a hidden B-day sub-row
+    var rh = '';
+    rows.forEach(function(p, i){
+      var subj      = p.subject || '';
+      // Pull plain text out of any [label](url) link wrapping
+      var lm        = subj.match(/^\[(.+?)\]\((https?:\/\/[^\)]+)\)$/);
+      var subjText  = lm ? lm[1] : subj;
+      var subjLink  = lm ? lm[2] : '';
+      // Resolve the row's color from saved subjectColors first, then hashed fallback
+      var rowColor  = (prefs.subjectColors && prefs.subjectColors[String(subjText).trim()]) || (typeof getSubjectColor === 'function' ? getSubjectColor(subjText) : '#6366f1');
+      // Custom-column cells
+      var customCells = customCols.map(function(col){
+        var val = (p.custom && p.custom[col.id]) || '';
+        return '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" value="' + esc(val) + '" data-i="' + i + '" data-cc="' + esc(col.id) + '" placeholder="—' + esc(col.name) + '—"></td>';
+      }).join('');
+
+      // A-day row
+      rh += '<tr data-row-i="' + i + '">'
+        + '<td style="padding:3px 4px"><input class="finp" style="width:42px;padding:5px 6px;font-size:11px" value="' + esc(String(p.period)) + '" data-i="' + i + '" data-f="period"></td>'
+        + '<td style="padding:3px 4px"><div style="display:flex;align-items:center;gap:5px;"><input type="color" style="width:26px;height:26px;padding:1px;border:1px solid var(--border);border-radius:6px;background:none;cursor:pointer;flex-shrink:0;" value="' + esc(rowColor) + '" data-i="' + i + '" data-f="color" title="Color for this subject on the calendar"><input class="finp" style="font-size:11px;padding:5px 6px;flex:1;min-width:80px;" value="' + esc(subjText) + '" data-i="' + i + '" data-f="subject" placeholder="—Subject—"></div></td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" value="' + esc(subjLink) + '" data-i="' + i + '" data-f="link" placeholder="—Link URL—" title="Optional: makes subject a clickable link"></td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" value="' + esc(p.teacher || '') + '" data-i="' + i + '" data-f="teacher" placeholder="—Teacher—"></td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="width:52px;font-size:11px;padding:5px 6px" value="' + esc(p.room || '') + '" data-i="' + i + '" data-f="room" placeholder="—Room—"></td>'
+        + '<td style="padding:3px 4px"><input type="time" class="finp" style="width:98px;font-size:11px;padding:5px 6px" value="' + (p.startTime || '') + '" data-i="' + i + '" data-f="startTime"></td>'
+        + '<td style="padding:3px 4px"><input type="time" class="finp" style="width:98px;font-size:11px;padding:5px 6px" value="' + (p.endTime || '') + '" data-i="' + i + '" data-f="endTime"></td>'
+        + '<td style="padding:3px 4px;text-align:center;"><label title="Different class on A vs B days" style="cursor:pointer;display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--tx3);"><input type="checkbox" ' + (p.abDay ? 'checked' : '') + ' data-i="' + i + '" data-f="abDay" onchange="toggleABRowVisibility(' + i + ')" style="accent-color:var(--a1);">A/B</label></td>'
+        + customCells
+        + '</tr>';
+
+      // B-day sub-row (hidden unless A/B is checked)
+      var bDisplay = p.abDay ? '' : 'display:none;';
+      rh += '<tr data-row-b="' + i + '" style="' + bDisplay + 'background:rgba(99,102,241,.04);">'
+        + '<td style="padding:3px 4px;text-align:right;font-size:9px;color:var(--a2);font-weight:700;letter-spacing:.5px;">B DAY \u2192</td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" value="' + esc(p.subjectB || '') + '" data-i="' + i + '" data-f="subjectB" placeholder="—B Day Subject—"></td>'
+        + '<td style="padding:3px 4px"></td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" value="' + esc(p.teacherB || '') + '" data-i="' + i + '" data-f="teacherB" placeholder="—B Day Teacher—"></td>'
+        + '<td style="padding:3px 4px"><input class="finp" style="width:52px;font-size:11px;padding:5px 6px" value="' + esc(p.roomB || '') + '" data-i="' + i + '" data-f="roomB" placeholder="—Room—"></td>'
+        + '<td colspan="' + (2 + customCols.length + 1) + '" style="padding:3px 4px;font-size:10px;color:var(--tx4);">Same time as A day</td>'
+        + '</tr>';
+    });
+
+    // Column visibility checkbox helper
+    function ck(key, lbl){
+      var on = cols.indexOf(key) > -1;
+      return '<label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--tx2);cursor:pointer;"><input type="checkbox" id="sc-' + key + '" ' + (on ? 'checked' : '') + ' style="accent-color:var(--a1);">' + lbl + '</label>';
+    }
+    // "Use School Times" button only shows if there are any bell schedules to import from
+    var importBtn = (bellSchedules && bellSchedules.length)
+      ? '<button class="btn btn-ghost btn-sm" onclick="openImportBellTimes()" style="font-size:11px;">\u2193 Use School Times</button>'
+      : '';
+
+    return '<div class="flip-back-card">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+      +   '<div class="flip-back-title" style="margin:0" data-emo="\ud83d\udccb">Class Schedule</div>'
+      +   '<div style="display:flex;gap:5px;flex-wrap:wrap;">' + importBtn + '<button class="btn btn-ghost btn-sm" onclick="flipAddSchedRow()" style="font-size:11px">+ Row</button><button class="btn btn-ghost btn-sm" onclick="flipAddCustomCol()" style="font-size:11px">+ Column</button></div>'
+      + '</div>'
+      + bellNote
+      + '<div style="background:rgba(99,102,241,.06);border:1px solid var(--a4);border-radius:8px;padding:8px 11px;margin-bottom:10px;font-size:11px;color:var(--tx2);line-height:1.5;"><strong style="color:var(--a2);">Tip:</strong> The color box next to each subject sets that subject\'s color on the calendar. Tasks for that subject use the color too.</div>'
+      // Column-visibility + highlight toggles
+      + '<div style="background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;">'
+      +   '<span style="font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--tx3);">Columns:</span>'
+      +   ck('teacher','Teacher') + ck('room','Room') + ck('time','Time')
+      +   '<div style="width:1px;height:16px;background:var(--border);"></div>'
+      +   '<label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--tx2);cursor:pointer;"><input type="checkbox" id="sc-highlight" ' + (hl ? 'checked' : '') + ' style="accent-color:var(--a1);">Highlight Current Class</label>'
+      + '</div>'
+      // Editor table
+      + '<div style="overflow-x:auto;overflow-y:auto;max-height:calc(100% - 200px)">'
+      +   '<table style="width:100%;border-collapse:collapse;min-width:760px">'
+      +     '<thead><tr>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">#</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">Color &amp; Subject</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">\ud83d\udd17 Link URL <span style="font-weight:400;opacity:.6;">(optional)</span></th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">Teacher</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">Room</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">Start</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:left;padding:0 4px 5px">End</th>'
+      +       '<th style="font-size:9px;color:var(--tx3);text-align:center;padding:0 4px 5px">A/B</th>'
+      +       customCols.map(function(col){ return '<th style="font-size:9px;color:var(--a2);text-align:left;padding:0 4px 5px">' + esc(col.name) + ' <button class="btn btn-danger btn-sm" onclick="flipDelCustomCol(\'' + esc(col.id) + '\')" style="padding:0 5px;font-size:10px;line-height:1;margin-left:3px;" title="Remove column">\u2715</button></th>'; }).join('')
+      +     '</tr></thead>'
+      +     '<tbody id="flip-sched-rows">' + rh + '</tbody>'
+      +   '</table>'
+      + '</div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'schedule\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="flipSaveSchedule()">Save Schedule</button>'
+      + '</div>'
+      + '</div>';
+  },
+
+  // ── REMINDERS ── new self-reminder form (title, body, datetime).
+  // Empty datetime fires immediately. Note: actual save handler lives in index_reminders.html.
+  reminders: function(){
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title" data-emo="\u23f0">New Reminder</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Title *</label>'
+      +   '<input class="finp" id="rem-title" placeholder="\u2014What\'s the reminder?\u2014" maxlength="100" onkeydown="if(event.key===\'Enter\')document.getElementById(\'rem-body\').focus()"></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Details (optional)</label>'
+      +   '<textarea class="fta" id="rem-body" placeholder="\u2014Add a note\u2014" style="min-height:54px;font-size:12px;" maxlength="300"></textarea></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">When? (leave blank for right now)</label>'
+      +   '<input type="datetime-local" class="finp" id="rem-when"></div>'
+      + '<div style="font-size:11px;color:var(--tx3);line-height:1.5;">This reminder is just for you. Teachers can send you reminders too \u2014 those show up automatically.</div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'reminders\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="saveMyReminderInline()">Save Reminder</button>'
+      + '</div></div>';
+  },
+
+  // ── ROW BANK ── student-facing ROW request form (teacher dropdown, category, description)
+  rowbank: function(){
+    var teachers    = (window._rowTeachers || []);
+    var teacherOpts = teachers.length
+      ? teachers.map(function(t){ return '<option value="' + esc(t.email) + '">' + esc(t.name) + '</option>'; }).join('')
+      : '<option value="">No teachers found</option>';
+    return '<div class="flip-back-card">'
+      + '<div class="flip-back-title row-flip-title">Request a ROW</div>'
+      + '<div style="font-size:11px;color:var(--tx3);line-height:1.6;margin-bottom:2px;">Pick the teacher who saw your good work, what you showed, and write a quick note about what you did.</div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">Teacher</label>'
+      +   '<select class="fsel" id="row-teach-sel">' + teacherOpts + '</select></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">What did you show?</label>'
+      +   '<div class="row-cat-grid" id="row-cat-grid">'
+      +     '<div class="row-cat-opt sel" data-cat="Respect"   onclick="pickRowCat(this)"><span class="row-cat-icon">R</span>Respect</div>'
+      +     '<div class="row-cat-opt"     data-cat="Ownership" onclick="pickRowCat(this)"><span class="row-cat-icon">O</span>Ownership</div>'
+      +     '<div class="row-cat-opt"     data-cat="Teamwork"  onclick="pickRowCat(this)"><span class="row-cat-icon">W</span>Teamwork</div>'
+      +   '</div></div>'
+      + '<div class="fg" style="margin:0;"><label class="flbl">What did you do? *</label>'
+      +   '<textarea class="fta" id="row-desc" placeholder="Example: I helped a classmate pick up their books when they spilled them in the hall." style="min-height:70px;font-size:13px;" maxlength="500"></textarea></div>'
+      + '<div class="flip-back-footer">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'rowbank\')">Cancel</button>'
+      +   '<button class="btn btn-primary" onclick="submitRowRequest()">Send Request</button>'
+      + '</div></div>';
+  }
+};
+
+// Widgets that have an Edit tab (in addition to Style). All others get
+// only a Style tab when flipped. Lookup table for buildBackPanel below.
+var HAS_EDIT_TAB = {
+  tasks:1, notes:1, links:1, schedule:1, weather:1, countdowns:1,
+  spotify:1, stocks:1, clock:1, timer:1, scores:1, rowbank:1, reminders:1
+};
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. FLIP MECHANISM
+   flipWidget opens the back face in Edit mode (default) — used by the
+   "+ Add" buttons on widgets and by the tab edit pencils.
+   flipToCustomize (defined in section 7) opens it in Style mode.
+   buildBackPanel switches between tabbed (Edit + Style) and Style-only
+   layouts based on HAS_EDIT_TAB membership.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open a widget's back face in Edit mode. Used by + Add buttons.
+function flipWidget(id, mode){
+  _flipMode[id] = mode || 'default';
+  var tile = document.getElementById('tile-' + id);
+  if (!tile) return;
+  var back = document.getElementById('tb-' + id);
+  if (!back) return;
+  back.innerHTML = buildBackPanel(id, 'edit');
+  tile.classList.add('flipped');
+}
+
+// Build the back panel HTML. Two layouts:
+//   - Tabbed (Edit | Style) for widgets in HAS_EDIT_TAB
+//   - Style-only (no tabs) for everything else, wrapped in flip-back-card
+//     so they share the same scrollable container + sticky footer
+function buildBackPanel(id, activeTab){
+  var hasEdit   = !!HAS_EDIT_TAB[id];
+  var editHTML  = hasEdit && WIDGET_BACK[id] ? WIDGET_BACK[id]() : '';
+  var styleHTML = buildStylePanelHTML(id);
+
+  // Style-only path — non-tabbed widgets (Google Apps, Lunch, Search,
+  // Quote, embedded docs, etc.). The flip-back-card wrapper is essential
+  // here: without it the Settings panel overflows the tile and the user
+  // can't scroll down to reach the Size grid.
+  if (!hasEdit){
+    return '<div class="flip-back-card">' + styleHTML + '</div>';
+  }
+
+  // Tabbed path
+  var isStyle = activeTab === 'style';
+  return '<div class="flip-back-card">'
+    + '<div style="display:flex;gap:3px;padding:12px 14px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;background:rgba(0,0,0,.18);">'
+    +   '<button class="flip-tab flip-tab-edit'  + (!isStyle ? ' active' : '') + '" onclick="switchBackTab(\'' + id + '\',\'edit\')">Edit</button>'
+    +   '<button class="flip-tab flip-tab-style' + ( isStyle ? ' active' : '') + '" onclick="switchBackTab(\'' + id + '\',\'style\')">Style</button>'
+    + '</div>'
+    + '<div style="flex:1;overflow-y:auto;padding:0;">'
+    +   '<div id="ftab-edit-'  + id + '" style="' + (isStyle ? 'display:none;' : '') + 'padding:4px 0;">' + editHTML + '</div>'
+    +   '<div id="ftab-style-' + id + '" style="' + (isStyle ? '' : 'display:none;') + 'padding:4px 0;">' + styleHTML + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+// Switch between Edit and Style tabs on the back face. Re-renders the
+// whole back panel and re-attaches style listeners if landing on Style.
+function switchBackTab(id, tab){
+  var back = document.getElementById('tb-' + id);
+  if (!back) return;
+  back.innerHTML = buildBackPanel(id, tab);
+  if (tab === 'style') setTimeout(function(){ attachStyleListeners(id); }, 10);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   10. EMBED DOC RENDERER + DOC URL HELPERS
+   Embedded Google Docs/Sheets/Slides/Forms render in iframes inside
+   their own tile. Tile id format: 'embed-<docId>'. The doc record
+   lives in myEmbeddedDocs.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render an embedded doc widget by tile id. Tile id is 'embed-<docId>';
+// looks up the doc record, derives an embed URL, and renders an iframe.
+// Returns a "Document not found" card if the doc was deleted.
+function renderEmbedWidgetHTML(tileId){
+  var docId = tileId.replace('embed-', '');
+  var doc = null;
+  for (var i = 0; i < myEmbeddedDocs.length; i++){
+    if (myEmbeddedDocs[i].id === docId){ doc = myEmbeddedDocs[i]; break; }
+  }
+  if (!doc) return '<div class="card"><div class="empty"><div class="empty-ico">&#128196;</div><p>Document not found.</p></div></div>';
+
+  var embedUrl = getEmbedUrl(doc.url);
+  // Icons keyed by docType (set when teacher embedded the doc)
+  var icons = {doc:'&#128196;', sheet:'&#128202;', slides:'&#128250;', form:'&#128203;'};
+
+  return '<div class="card" style="padding:0;display:flex;flex-direction:column;overflow:hidden;height:100%;">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;flex-shrink:0;">'
+    +   '<div class="card-lbl">' + (icons[doc.docType] || '&#128196;') + ' ' + esc(doc.title) + '</div>'
+    +   '<a href="' + esc(doc.url) + '" target="_blank" class="btn btn-ghost btn-sm">&#128279; Open</a>'
+    + '</div>'
+    + '<div style="flex:1;min-height:0;">'
+    +   '<iframe src="' + esc(embedUrl) + '" style="width:100%;height:100%;border:none;display:block;" allowfullscreen loading="lazy"></iframe>'
+    + '</div></div>';
+}
+
+// Detect document type from URL — used when the teacher embeds a doc
+// and we need to pick an icon and the right embed URL transform.
+function detectDocType(url){
+  if (!url) return 'doc';
+  if (url.includes('/spreadsheets/')) return 'sheet';
+  if (url.includes('/presentation/')) return 'slides';
+  if (url.includes('/forms/d/'))      return 'form';
+  return 'doc';
+}
+
+// Convert a Google Docs/Sheets/Slides/Forms edit URL into an embeddable
+// preview URL. Each product has its own URL pattern:
+//   Docs:   /edit → /preview
+//   Sheets: /edit → /htmlembed (works without "Publish to web")
+//   Slides: /edit → /embed
+//   Forms:  /edit → /viewform?embedded=true
+function getEmbedUrl(url){
+  if (!url) return '';
+  try {
+    if (url.includes('/document/d/'))   return url.replace(/\/edit[^]*$/, '/preview');
+    if (url.includes('/spreadsheets/')) return url.replace(/\/edit[^]*$/, '/htmlembed?widget=true&headers=false&chrome=false');
+    if (url.includes('/presentation/')) return url.replace(/\/edit[^]*$/, '/embed?start=false&loop=false');
+    if (url.includes('/forms/d/'))      return url.replace(/\/edit[^]*$/, '/viewform?embedded=true');
+    return url;
+  } catch(e){
+    return url;
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   11. SCHEDULE WIDGET — all handlers
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Schedule widget's static front-face wrapper. Body filled by renderSchedule.
+function schedCard(){
+  return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-schedule"/></svg> Class Schedule</div></div><div id="sched-area"><div class="empty"><p>Click the gear to add classes.</p></div></div></div>';
+}
+
+// Render the schedule table inside #sched-area. Handles bell-schedule
+// override times, A/B day rotation, custom columns, and "current period"
+// highlighting. The most complex render in this file.
+function renderSchedule(){
+  var el = document.getElementById('sched-area');
+  if (!el) return;
+  if (!mySchedule.length){ el.innerHTML = '<div class="empty"><p>Click the gear to add classes.</p></div>'; return; }
+
+  var now        = new Date();
+  var cur        = now.getHours() * 60 + now.getMinutes();
+  var cols       = prefs.schedCols || ['period','subject','teacher','room','time'];
+  var customCols = prefs.schedCustomCols || [];
+  var hl         = prefs.schedHighlight !== false;
+
+  // ── A/B day resolution ──
+  // Today's day type comes from the active bell schedule's calendar entry.
+  // showAB pref can force a specific day for viewing ('A','B','auto').
+  var todayDayType = (activeBell && activeBell.dayType) ? String(activeBell.dayType).toUpperCase() : '';
+  var showAB      = prefs.schedShowAB || 'auto';
+  var effectiveAB = showAB === 'auto' ? (todayDayType === 'B' ? 'B' : 'A') : showAB;
+
+  // Banner: shown when an override bell schedule is active OR when the user has any A/B periods
+  var bannerHtml = '';
+  if (activeBell && activeBell.hasOverride && activeBell.schedule){
+    var dayLbl = todayDayType ? ' &middot; ' + todayDayType + ' Day' : '';
+    bannerHtml = '<div style="background:' + (activeBell.schedule.color || 'var(--a3)') + '22;border:1px solid ' + (activeBell.schedule.color || 'var(--a4)') + ';border-radius:8px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:var(--tx2);display:flex;align-items:center;gap:8px;"><strong style="color:var(--tx);">' + esc(activeBell.schedule.name) + '</strong>' + dayLbl + (activeBell.notes ? ' &middot; <span style="color:var(--tx3);">' + esc(activeBell.notes) + '</span>' : '') + '<button class="btn btn-ghost btn-sm" style="margin-left:auto;font-size:10px;padding:2px 7px;" onclick="toggleABView()">View ' + (effectiveAB === 'A' ? 'B' : 'A') + ' Day</button></div>';
+  } else if (mySchedule.some(function(p){ return p.abDay; })){
+    bannerHtml = '<div style="background:var(--a5);border:1px solid var(--a4);border-radius:8px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:var(--tx2);display:flex;align-items:center;gap:8px;">Showing <strong style="color:var(--a2);">' + effectiveAB + ' Day</strong> classes<button class="btn btn-ghost btn-sm" style="margin-left:auto;font-size:10px;padding:2px 7px;" onclick="toggleABView()">Switch to ' + (effectiveAB === 'A' ? 'B' : 'A') + '</button></div>';
+  }
+
+  // Use bell schedule period times if active, otherwise the student's own times
+  var bellPeriods = (activeBell && activeBell.schedule && activeBell.schedule.periods) ? activeBell.schedule.periods : [];
+  function bellTimeFor(period){
+    for (var i = 0; i < bellPeriods.length; i++){
+      if (String(bellPeriods[i].period) === String(period)) return bellPeriods[i];
+    }
+    return null;
+  }
+
+  var sorted = mySchedule.slice().sort(function(a, b){ return Number(a.period) - Number(b.period); });
+
+  // Build header row from active columns
+  var thead = '<tr>';
+  if (cols.indexOf('period')  > -1) thead += '<th>#</th>';
+  if (cols.indexOf('subject') > -1) thead += '<th>Subject</th>';
+  if (cols.indexOf('teacher') > -1) thead += '<th>Teacher</th>';
+  if (cols.indexOf('room')    > -1) thead += '<th>Room</th>';
+  if (cols.indexOf('time')    > -1) thead += '<th>Time</th>';
+  customCols.forEach(function(col){ thead += '<th>' + esc(col.name) + '</th>'; });
+  thead += '</tr>';
+
+  // Build data rows
+  var rows = sorted.map(function(p){
+    // Pick A or B values based on effective day type
+    var displaySubj  = p.subject || '';
+    var displayTeach = p.teacher || '';
+    var displayRoom  = p.room || '';
+    if (p.abDay && effectiveAB === 'B'){
+      displaySubj  = p.subjectB  || p.subject || '';
+      displayTeach = p.teacherB  || p.teacher || '';
+      displayRoom  = p.roomB     || p.room    || '';
+    }
+
+    // Override times with bell schedule if there's a matching entry
+    var bp     = bellTimeFor(p.period);
+    var startT = bp ? bp.startTime : (p.startTime || '');
+    var endT   = bp ? bp.endTime   : (p.endTime   || '');
+    var pForCheck = {startTime:startT, endTime:endT};
+    var on        = isNowPeriod(pForCheck, cur);
+
+    // If subject is wrapped as [label](url), make it a clickable link
+    var lm = displaySubj.match(/^\[(.+?)\]\((https?:\/\/[^\)]+)\)$/);
+    var subjHtml = lm
+      ? '<a href="' + esc(lm[2]) + '" target="_blank" style="color:var(--a2);text-decoration:none;" onmouseover="this.style.textDecoration=\'underline\'" onmouseout="this.style.textDecoration=\'none\'">' + esc(lm[1]) + '</a>'
+      : esc(displaySubj);
+    var abBadge = p.abDay ? '<span style="font-size:9px;font-weight:700;background:var(--a5);border:1px solid var(--a4);color:var(--a2);border-radius:4px;padding:1px 5px;margin-left:5px;">' + effectiveAB + '</span>' : '';
+    var rc = (on && hl) ? ' class="sched-row-now"' : '';
+
+    var tr = '<tr' + rc + '>';
+    if (cols.indexOf('period')  > -1) tr += '<td><span class="per-num">' + esc(String(p.period)) + '</span></td>';
+    if (cols.indexOf('subject') > -1) tr += '<td>' + subjHtml + abBadge + (on ? '<span class="now-tag">Now</span>' : '') + '</td>';
+    if (cols.indexOf('teacher') > -1) tr += '<td class="muted">' + esc(displayTeach || '--') + '</td>';
+    if (cols.indexOf('room')    > -1) tr += '<td class="muted">' + esc(displayRoom  || '--') + '</td>';
+    if (cols.indexOf('time')    > -1) tr += '<td class="muted">' + fmtTime(startT || '') + (endT ? ' – ' + fmtTime(endT) : '') + '</td>';
+    customCols.forEach(function(col){
+      var val = (p.custom && p.custom[col.id]) || '';
+      tr += '<td class="muted">' + esc(val || '--') + '</td>';
+    });
+    tr += '</tr>';
+    return tr;
+  }).join('');
+
+  el.innerHTML = bannerHtml + '<table class="sched-tbl"><thead>' + thead + '</thead><tbody>' + rows + '</tbody></table>';
+}
+
+// Standalone schedule loader. Used as a fallback when getHomeData fails.
+function loadSchedule(){
+  google.script.run.withSuccessHandler(function(r){
+    mySchedule = r.schedule || [];
+    renderSchedule();
+  }).getMySchedule();
+}
+
+// Cycle the A/B view mode: auto → A → B → auto.
+// 'auto' uses today's actual day type; A/B forces a specific view.
+function toggleABView(){
+  var cur  = prefs.schedShowAB || 'auto';
+  var next = cur === 'auto' ? 'A' : (cur === 'A' ? 'B' : 'auto');
+  prefs.schedShowAB = next;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  renderSchedule();
+}
+
+// Show/hide the B-day sub-row in the schedule editor when the A/B
+// checkbox is toggled on a specific row.
+function toggleABRowVisibility(i){
+  var bRow = document.querySelector('[data-row-b="' + i + '"]');
+  var cb   = document.querySelector('input[data-i="' + i + '"][data-f="abDay"]');
+  if (bRow && cb){
+    bRow.style.display = cb.checked ? '' : 'none';
+  }
+}
+
+// Test if the current minute (`cur` = h*60 + m) falls within a period's
+// startTime/endTime window. Returns false if either time is missing or unparseable.
+function isNowPeriod(p, cur){
+  if (!p.startTime || !p.endTime) return false;
+  try {
+    var sp = p.startTime.split(':');
+    var ep = p.endTime.split(':');
+    return cur >= parseInt(sp[0]) * 60 + parseInt(sp[1])
+        && cur <= parseInt(ep[0]) * 60 + parseInt(ep[1]);
+  } catch(e){
+    return false;
+  }
+}
+
+// Open the bell-times import modal. Lets the user pick a school bell
+// schedule and pull its period times into their own schedule editor.
+function openImportBellTimes(){
+  if (!bellSchedules || !bellSchedules.length){ toast('No bell schedules available', 'err'); return; }
+
+  var ov = document.createElement('div');
+  ov.className = 'overlay open';
+  ov.id = 'ibt-ov';
+  var opts = bellSchedules.map(function(b){ return '<option value="' + esc(b.id) + '">' + esc(b.name) + (b.isDefault ? ' (default)' : '') + '</option>'; }).join('');
+
+  ov.innerHTML = '<div class="mbox" style="max-width:420px;">'
+    + '<div class="mtitle">↓ Use School Period Times</div>'
+    + '<p style="font-size:13px;color:var(--tx2);margin-bottom:14px;line-height:1.6;">Pick a bell schedule to copy its period times into your schedule. Your subjects, teachers, and rooms stay the same.</p>'
+    + '<div class="fg"><label class="flbl">Bell Schedule</label><select class="fsel" id="ibt-sel">' + opts + '</select></div>'
+    + '<div class="mfooter"><button class="btn btn-ghost" onclick="document.getElementById(\'ibt-ov\').remove()">Cancel</button><button class="btn btn-primary" onclick="doImportBellTimes()">Apply Times</button></div>'
+    + '</div>';
+  document.body.appendChild(ov);
+}
+
+// Apply selected bell schedule's period times to the schedule editor's
+// current rows by matching period numbers. Doesn't save — user still
+// needs to click Save Schedule afterwards.
+function doImportBellTimes(){
+  var sel = document.getElementById('ibt-sel');
+  var id  = sel ? sel.value : '';
+  var bell = null;
+  for (var i = 0; i < bellSchedules.length; i++) if (bellSchedules[i].id === id) bell = bellSchedules[i];
+  if (!bell){ toast('Schedule not found', 'err'); return; }
+
+  // For each editor row, find the bell schedule's matching period and copy times in
+  var rows = document.querySelectorAll('#flip-sched-rows tr[data-row-i]');
+  rows.forEach(function(tr){
+    var perInp = tr.querySelector('input[data-f="period"]');
+    if (!perInp) return;
+    var per = perInp.value;
+    for (var j = 0; j < bell.periods.length; j++){
+      if (String(bell.periods[j].period) === String(per)){
+        var s = tr.querySelector('input[data-f="startTime"]');
+        var e = tr.querySelector('input[data-f="endTime"]');
+        if (s) s.value = bell.periods[j].startTime || '';
+        if (e) e.value = bell.periods[j].endTime   || '';
+        break;
+      }
+    }
+  });
+  document.getElementById('ibt-ov').remove();
+  toast('Times applied — click Save', 'ok');
+}
+
+// Append a new empty A-day row + hidden B-day sub-row to the schedule editor.
+// Used by the "+ Row" button on the editor's flip back.
+function flipAddSchedRow(){
+  var tb = document.getElementById('flip-sched-rows');
+  if (!tb) return;
+  // Count only main rows (not B-day sub-rows) for the period number
+  var mainRows = tb.querySelectorAll('tr[data-row-i]');
+  var i = mainRows.length;
+  var customCols  = prefs.schedCustomCols || [];
+  var customCells = customCols.map(function(col){
+    return '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-cc="' + esc(col.id) + '" placeholder="—' + esc(col.name) + '—"></td>';
+  }).join('');
+
+  // A-day row
+  var tr = document.createElement('tr');
+  tr.dataset.rowI = i;
+  tr.innerHTML = '<td style="padding:3px 4px"><input class="finp" style="width:42px;padding:5px 6px;font-size:11px" value="' + (i + 1) + '" data-i="' + i + '" data-f="period"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="subject" placeholder="—Subject—"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="link" placeholder="—Link URL—"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="teacher" placeholder="—Teacher—"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="width:52px;font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="room" placeholder="—Room—"></td>'
+    + '<td style="padding:3px 4px"><input type="time" class="finp" style="width:98px;font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="startTime"></td>'
+    + '<td style="padding:3px 4px"><input type="time" class="finp" style="width:98px;font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="endTime"></td>'
+    + '<td style="padding:3px 4px;text-align:center;"><label style="cursor:pointer;display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--tx3);"><input type="checkbox" data-i="' + i + '" data-f="abDay" onchange="toggleABRowVisibility(' + i + ')" style="accent-color:var(--a1);">A/B</label></td>'
+    + customCells;
+  tb.appendChild(tr);
+
+  // B-day sub-row (hidden by default)
+  var trB = document.createElement('tr');
+  trB.dataset.rowB = i;
+  trB.style.display = 'none';
+  trB.style.background = 'rgba(99,102,241,.04)';
+  trB.innerHTML = '<td style="padding:3px 4px;text-align:right;font-size:9px;color:var(--a2);font-weight:700;letter-spacing:.5px;">B DAY →</td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="subjectB" placeholder="—B Day Subject—"></td>'
+    + '<td style="padding:3px 4px"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="teacherB" placeholder="—B Day Teacher—"></td>'
+    + '<td style="padding:3px 4px"><input class="finp" style="width:52px;font-size:11px;padding:5px 6px" data-i="' + i + '" data-f="roomB" placeholder="—Room—"></td>'
+    + '<td colspan="' + (3 + customCols.length) + '" style="padding:3px 4px;font-size:10px;color:var(--tx4);">Same time as A day</td>';
+  tb.appendChild(trB);
+}
+
+// NOTE: flipAddCustomCol and flipDelCustomCol are ALSO defined in
+// index_settings.html. Last-loaded definition wins. Both versions
+// behave equivalently — preserved verbatim per refactor rules.
+
+// Add a new custom column to the schedule editor (e.g. "Homework", "Materials").
+function flipAddCustomCol(){
+  var name = prompt('Custom column name:');
+  if (!name || !name.trim()) return;
+  if (!prefs.schedCustomCols) prefs.schedCustomCols = [];
+  prefs.schedCustomCols.push({id:'cc-' + Date.now(), name:name.trim()});
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  // Re-render the schedule edit panel so the new column shows up
+  var back = document.getElementById('tb-schedule');
+  if (back) back.innerHTML = WIDGET_BACK.schedule();
+  toast('Column added', 'ok');
+}
+
+// Remove a custom column from the schedule. Doesn't strip per-period
+// values from mySchedule — those become orphan keys on each period.custom
+// (intentionally — this version of the function only re-renders the editor).
+function flipDelCustomCol(id){
+  if (!confirm('Remove this custom column?')) return;
+  prefs.schedCustomCols = (prefs.schedCustomCols || []).filter(function(c){ return c.id !== id; });
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  var back = document.getElementById('tb-schedule');
+  if (back) back.innerHTML = WIDGET_BACK.schedule();
+  toast('Column removed', 'inf');
+}
+
+// Save the schedule editor's contents. Walks every input via data-i
+// (row index) + data-f (field) or data-cc (custom column id) attrs,
+// builds a row-keyed object, then filters to rows with a subject.
+// Also extracts the per-row color picker into prefs.subjectColors.
+function flipSaveSchedule(){
+  var allInputs = document.querySelectorAll('#flip-sched-rows input');
+  var map = {};
+  allInputs.forEach(function(inp){
+    var i = inp.dataset.i;
+    if (!i && i !== 0) return;
+    if (!map[i]) map[i] = {custom:{}};
+    if (inp.dataset.f){
+      // Checkboxes use .checked, everything else .value
+      if (inp.type === 'checkbox') map[i][inp.dataset.f] = inp.checked;
+      else                          map[i][inp.dataset.f] = inp.value;
+    }
+    else if (inp.dataset.cc){
+      map[i].custom[inp.dataset.cc] = inp.value;
+    }
+  });
+
+  // Pull subject colors out into prefs.subjectColors before saving the schedule.
+  // Both A-day subject and B-day subject get the same row color.
+  if (!prefs.subjectColors) prefs.subjectColors = {};
+  Object.values(map).forEach(function(p){
+    if (p.subject  && p.subject.trim()  && p.color) prefs.subjectColors[p.subject.trim()]  = p.color;
+    if (p.subjectB && p.subjectB.trim() && p.color) prefs.subjectColors[p.subjectB.trim()] = p.color;
+    delete p.color; // color is stored separately, not on the period record
+  });
+
+  // Drop empty rows (no subject)
+  var sched = Object.values(map).filter(function(p){ return p.subject && p.subject.trim(); });
+
+  // Re-wrap subject as [label](url) if a link was provided
+  sched = sched.map(function(p){
+    var subj = (p.subject || '').trim();
+    var link = (p.link || '').trim();
+    if (link && link.startsWith('http') && subj) p.subject = '[' + subj + '](' + link + ')';
+    delete p.link;
+    return p;
+  });
+
+  // Read column-visibility checkboxes (period and subject are always shown)
+  var newCols = ['period','subject'];
+  ['teacher','room','time'].forEach(function(k){
+    var cb = document.getElementById('sc-' + k);
+    if (cb && cb.checked) newCols.push(k);
+  });
+  prefs.schedCols = newCols;
+
+  var hlCb = document.getElementById('sc-highlight');
+  prefs.schedHighlight = hlCb ? hlCb.checked : true;
+
+  mySchedule = sched;
+  unflipWidget('schedule');
+  renderSchedule();
+  toast('Schedule saved', 'ok');
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  google.script.run.saveMySchedule(JSON.stringify(sched));
+}
+
+// ─── LEGACY SCHEDULE EDITOR (likely dead code) ────────────────────────
+// These three functions implement an older modal-based schedule editor
+// using element IDs `se-ov` and `se-rows`. The current editor lives on
+// the widget's flip-back face (functions above). Preserved verbatim.
+
+// Legacy: open the modal-based schedule editor.
+function openSchedEditor(){
+  var div = document.createElement('div');
+  div.className = 'overlay open';
+  div.id = 'se-ov';
+  var rows = mySchedule.length ? mySchedule : (function(){
+    var r = [];
+    for (var i = 0; i < 7; i++) r.push({period:i+1, subject:'', teacher:'', room:'', startTime:'', endTime:''});
+    return r;
+  })();
+  var rh = '';
+  rows.forEach(function(p, i){
+    rh += '<tr><td style="padding:4px 5px;"><input class="finp" style="width:50px" value="' + esc(String(p.period)) + '" data-i="' + i + '" data-f="period"></td><td style="padding:4px 5px;"><input class="finp" value="' + esc(p.subject || '') + '" data-i="' + i + '" data-f="subject" placeholder="—Subject—"></td><td style="padding:4px 5px;"><input class="finp" value="' + esc(p.teacher || '') + '" data-i="' + i + '" data-f="teacher" placeholder="—Name—"></td><td style="padding:4px 5px;"><input class="finp" style="width:68px" value="' + esc(p.room || '') + '" data-i="' + i + '" data-f="room" placeholder="—Room—"></td><td style="padding:4px 5px;"><input type="time" class="finp" style="width:112px" value="' + (p.startTime || '') + '" data-i="' + i + '" data-f="startTime"></td><td style="padding:4px 5px;"><input type="time" class="finp" style="width:112px" value="' + (p.endTime || '') + '" data-i="' + i + '" data-f="endTime"></td></tr>';
+  });
+  div.innerHTML = '<div class="mbox wide"><div class="mtitle">&#128203; Edit Class Schedule</div><div style="overflow-y:auto;max-height:55vh;"><table style="width:100%;border-collapse:collapse;"><thead><tr><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">#</th><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">Subject</th><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">Teacher</th><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">Room</th><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">Start</th><th style="padding:5px 7px;font-size:11px;color:var(--tx3);text-align:left;">End</th></tr></thead><tbody id="se-rows">' + rh + '</tbody></table></div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;"><button class="btn btn-ghost btn-sm" onclick="addSchedRow()">+ Add Row</button><div style="display:flex;gap:8px;"><button class="btn btn-ghost" onclick="document.getElementById(\'se-ov\').remove()">Cancel</button><button class="btn btn-primary" onclick="saveSchedule()">Save</button></div></div></div>';
+  document.body.appendChild(div);
+}
+
+// Legacy: append a row to the modal-based editor.
+function addSchedRow(){
+  var tb = document.getElementById('se-rows');
+  var i  = tb.querySelectorAll('tr').length;
+  var tr = document.createElement('tr');
+  tr.innerHTML = '<td style="padding:4px 5px;"><input class="finp" style="width:50px" value="' + (i + 1) + '" data-i="' + i + '" data-f="period"></td><td style="padding:4px 5px;"><input class="finp" data-i="' + i + '" data-f="subject" placeholder="—Class—"></td><td style="padding:4px 5px;"><input class="finp" data-i="' + i + '" data-f="teacher" placeholder="—Name—"></td><td style="padding:4px 5px;"><input class="finp" style="width:68px" data-i="' + i + '" data-f="room" placeholder="—Room—"></td><td style="padding:4px 5px;"><input type="time" class="finp" style="width:112px" data-i="' + i + '" data-f="startTime"></td><td style="padding:4px 5px;"><input type="time" class="finp" style="width:112px" data-i="' + i + '" data-f="endTime"></td>';
+  tb.appendChild(tr);
+}
+
+// Legacy: save and close the modal-based editor.
+function saveSchedule(){
+  var inputs = document.querySelectorAll('#se-rows input');
+  var map = {};
+  inputs.forEach(function(inp){
+    var i = inp.dataset.i;
+    if (!map[i]) map[i] = {};
+    map[i][inp.dataset.f] = inp.value;
+  });
+  var sched = Object.values(map).filter(function(p){ return p.subject && p.subject.trim(); });
+  document.getElementById('se-ov').remove();
+  mySchedule = sched;
+  renderSchedule();
+  toast('Schedule saved', 'ok');
+  google.script.run.saveMySchedule(JSON.stringify(sched));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   12. TASKS WIDGET — all handlers
+   Includes the easter-egg "emoji mode" trigger (a task titled
+   "put emojis everywhere") and the science-mode trigger.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the tasks list with current sort, list filter, and emoji-mode check.
+// Splits into pending + done; both sorted by the chosen mode.
+function renderTasks(){
+  checkEmojiEasterEgg();
+  renderTaskTabBar();
+
+  var el = document.getElementById('task-area');
+  if (!el) return;
+
+  // Filter by active list — 'default' shows everything
+  var activeList = prefs.taskActiveList || 'default';
+  var listMap    = prefs.taskListMap    || {};
+  var filtered   = myTasks.filter(function(t){ return activeList === 'default' || (listMap[t.id] === activeList); });
+
+  if (!filtered.length){
+    el.innerHTML = '<div class="empty"><p>' + (activeList === 'default' ? 'All clear!' : 'No tasks in this list.') + '</p></div>';
+    return;
+  }
+
+  var pend = filtered.filter(function(t){ return t.status !== 'completed'; });
+  var done = filtered.filter(function(t){ return t.status === 'completed'; });
+
+  // Sort comparator — varies by prefs.taskSort
+  var mode = prefs.taskSort || 'default';
+  var PRI  = {high:0, medium:1, low:2};
+  function sortFn(a, b){
+    if (mode === 'duedate'){
+      // No-due-date tasks sink to the bottom
+      if (!a.dueDate && b.dueDate) return  1;
+      if ( a.dueDate && !b.dueDate) return -1;
+      if (!a.dueDate && !b.dueDate) return  0;
+      return new Date(a.dueDate) - new Date(b.dueDate);
+    }
+    if (mode === 'subject'){
+      // Use 'zzz' as a sort sentinel so blanks fall to the end
+      return (a.subject || 'zzz').localeCompare(b.subject || 'zzz');
+    }
+    if (mode === 'dateadded'){
+      // Newest first — sort by reverse position in myTasks (newer is unshifted, so lower index = newer)
+      return (myTasks.indexOf(b) - myTasks.indexOf(a));
+    }
+    if (mode === 'alpha'){
+      return (a.title || '').localeCompare(b.title || '');
+    }
+    // Default: priority high→low, then due date earliest first
+    var p = (PRI[a.priority] || 1) - (PRI[b.priority] || 1);
+    if (p !== 0) return p;
+    if (!a.dueDate && b.dueDate) return  1;
+    if ( a.dueDate && !b.dueDate) return -1;
+    if ( a.dueDate && b.dueDate) return new Date(a.dueDate) - new Date(b.dueDate);
+    return 0;
+  }
+  pend.sort(sortFn);
+  done.sort(sortFn);
+
+  el.innerHTML = '<div class="task-list">' + pend.concat(done).map(taskRow).join('') + '</div>';
+}
+
+// Render a single task row. Shows priority dot, title, subject pill,
+// due-date pill (red if overdue), assigned-by pill, edit + delete buttons.
+function taskRow(t){
+  var today = new Date().toISOString().slice(0, 10);
+  var ov    = t.dueDate && t.dueDate < today && t.status !== 'completed';
+  return '<div class="task-row' + (t.status === 'completed' ? ' done' : '') + '" id="tr-' + t.id + '">'
+    + '<button class="chk" onclick="toggleTask(\'' + t.id + '\',\'' + t.status + '\')"> ' + (t.status === 'completed' ? '&#10003;' : '') + '</button>'
+    + '<div class="dot ' + t.priority + '"></div>'
+    + '<div class="task-body">'
+    +   '<div class="task-title">' + esc(t.title) + '</div>'
+    +   '<div class="task-sub">'
+    +     (t.subject ? '<span class="tchip">' + esc(t.subject) + '</span>' : '')
+    +     (t.dueDate ? '<span class="tchip' + (ov ? ' overdue' : '') + '">' + (ov ? '&#9888; ' : '') + fmtDate(t.dueDate) + '</span>' : '')
+    +     (t.assignedBy && t.assignedBy !== CU.email ? '<span class="tchip assigned">Assigned</span>' : '')
+    +   '</div>'
+    + '</div>'
+    + '<button class="del-btn" onclick="editTask(\'' + t.id + '\')" title="Edit" style="font-size:14px;">&#9998;</button>'
+    + '<button class="del-btn" onclick="removeTask(\'' + t.id + '\')">&#10005;</button>'
+    + '</div>';
+}
+
+// Toggle a task between pending and completed. Updates locally first
+// for snappy UI, then persists. No rollback on failure (intentional —
+// errors here are rare and the next refresh would reconcile).
+function toggleTask(id, cur){
+  var next = cur === 'completed' ? 'pending' : 'completed';
+  for (var i = 0; i < myTasks.length; i++){
+    if (myTasks[i].id === id){ myTasks[i].status = next; break; }
+  }
+  renderTasks();
+  google.script.run.setTaskStatus(id, next);
+}
+
+// Update the sort mode for the task list.
+function setTaskSort(v){
+  prefs.taskSort = v;
+  renderTasks();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Standalone task loader. Used as a fallback when getHomeData fails.
+function loadTasks(){
+  google.script.run.withSuccessHandler(function(ts){
+    myTasks = ts || [];
+    renderTasks();
+  }).getMyTasks();
+}
+
+// Optimistically delete a task — remove locally, post to server,
+// roll back if server fails.
+function removeTask(id){
+  var removed = myTasks.filter(function(t){ return t.id === id; });
+  myTasks = myTasks.filter(function(t){ return t.id !== id; });
+  renderTasks();
+  google.script.run.withSuccessHandler(function(){
+    toast('Removed', 'inf');
+  }).withFailureHandler(function(){
+    myTasks = myTasks.concat(removed);
+    renderTasks();
+    toast('Error removing task', 'err');
+  }).deleteTask(id);
+}
+
+// Add task via the modal form (m-tt, m-ts, m-td, m-tp, m-tn, m-tr).
+// Optimistically inserts with a temp id; replaces with server id on success.
+// If the modal had a reminder time set, creates a linked reminder too.
+function doAddTask(){
+  var title = document.getElementById('m-tt').value.trim();
+  if (!title){ toast('Enter a title', 'err'); return; }
+  var subject  = document.getElementById('m-ts').value.trim();
+  var due      = document.getElementById('m-td').value;
+  var priority = document.getElementById('m-tp').value;
+  var notes    = document.getElementById('m-tn').value.trim();
+  var remindAt = (document.getElementById('m-tr') || {}).value || '';
+
+  closeModal('task-modal');
+  var tempId = 'tmp-' + Date.now();
+  myTasks.unshift({id:tempId, title:title, subject:subject, dueDate:due, priority:priority, status:'pending', notes:notes, assignedBy:CU.email});
+  renderTasks();
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      // Swap temp id for real server id
+      for (var i = 0; i < myTasks.length; i++){
+        if (myTasks[i].id === tempId){ myTasks[i].id = r.id; break; }
+      }
+      // If we're on a non-default list, map this task to it
+      if (prefs.taskActiveList && prefs.taskActiveList !== 'default'){
+        if (!prefs.taskListMap) prefs.taskListMap = {};
+        prefs.taskListMap[r.id] = prefs.taskActiveList;
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      }
+      renderTasks();
+      toast('Task added', 'ok');
+      // Linked reminder — fires at remindAt time, mentions subject/notes
+      if (remindAt){
+        var remISO = new Date(remindAt).toISOString();
+        var bodyMsg = subject ? ('For ' + subject) : (notes || '');
+        google.script.run.addMyReminder(title, bodyMsg, remISO, r.id, subject || '');
+      }
+    } else {
+      // Roll back the optimistic insert
+      myTasks = myTasks.filter(function(t){ return t.id !== tempId; });
+      renderTasks();
+      toast('Error saving task', 'err');
+    }
+  }).addMyTask(title, subject, due, priority, notes);
+}
+
+// Inline edit a task — replace its row with an editor form.
+// Calling editTask on the currently-editing task cancels instead.
+function editTask(id){
+  if (editingTaskId === id){ cancelEditTask(); return; }
+  cancelEditTask();
+  editingTaskId = id;
+
+  var task = null;
+  for (var i = 0; i < myTasks.length; i++){
+    if (myTasks[i].id === id){ task = myTasks[i]; break; }
+  }
+  if (!task) return;
+
+  var row = document.getElementById('tr-' + id);
+  if (!row) return;
+
+  var priOpts  = ['high','medium','low'].map(function(p){ return '<option value="' + p + '"' + (task.priority === p ? ' selected' : '') + '>' + p.charAt(0).toUpperCase() + p.slice(1) + '</option>'; }).join('');
+  var subjOpts = buildSubjectDropdownOptions(task.subject || '');
+  row.innerHTML = '<div class="task-edit-form">'
+    + '<input class="finp" id="te-title" value="' + esc(task.title) + '" style="font-size:13px;">'
+    + '<div class="task-edit-row2">'
+    +   '<select class="fsel" id="te-subj" style="font-size:12px;">' + subjOpts + '</select>'
+    +   '<select class="fsel" id="te-pri" style="font-size:12px;">' + priOpts + '</select>'
+    + '</div>'
+    + '<input type="date" class="finp" id="te-due" value="' + (task.dueDate || '') + '" style="font-size:12px;">'
+    + '<textarea class="finp" id="te-notes" placeholder="—Notes—" style="min-height:48px;resize:none;font-size:12px;">' + esc(task.notes || '') + '</textarea>'
+    + '<div style="display:flex;gap:6px;justify-content:flex-end;">'
+    +   '<button class="btn btn-ghost btn-sm" onclick="cancelEditTask()">Cancel</button>'
+    +   '<button class="btn btn-primary btn-sm" onclick="saveEditTask(\'' + id + '\')">Save</button>'
+    + '</div>'
+    + '</div>';
+  var te = document.getElementById('te-title');
+  if (te) te.focus();
+}
+
+// Cancel inline task editing — reset state and re-render.
+function cancelEditTask(){
+  editingTaskId = null;
+  renderTasks();
+}
+
+// Save inline task edits — update local + server.
+function saveEditTask(id){
+  var t = ((document.getElementById('te-title') || {}).value || '').trim();
+  if (!t){ toast('Title required', 'err'); return; }
+  var s = ((document.getElementById('te-subj')  || {}).value || '').trim();
+  var p = (document.getElementById('te-pri')   || {}).value || 'medium';
+  var d = (document.getElementById('te-due')   || {}).value || '';
+  var n = ((document.getElementById('te-notes') || {}).value || '').trim();
+
+  for (var i = 0; i < myTasks.length; i++){
+    if (myTasks[i].id === id){
+      myTasks[i].title    = t;
+      myTasks[i].subject  = s;
+      myTasks[i].priority = p;
+      myTasks[i].dueDate  = d;
+      myTasks[i].notes    = n;
+      break;
+    }
+  }
+  editingTaskId = null;
+  renderTasks();
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success) toast('Task updated', 'ok');
+    else                 toast('Error', 'err');
+  }).updateTask(id, t, s, d, p, n);
+}
+
+// Save handler for the flip-back add-task form. Differs from doAddTask:
+// it's called from the widget's flip back, not the modal. Has an "also
+// add to Google Calendar" checkbox that opens a synchronous calendar
+// URL (must run in click event so popup blocker doesn't kill it).
+function flipSaveTask(){
+  var title    = document.getElementById('flip-task-title');
+  var titleVal = title ? title.value.trim() : '';
+  if (!titleVal){ toast('Enter a title', 'err'); return; }
+  // Easter egg: science-mode trigger
+  if (checkScienceTrigger(titleVal)){ activateScienceMode(); }
+
+  var subj   = document.getElementById('flip-task-subj');
+  var pri    = document.getElementById('flip-task-pri');
+  var due    = document.getElementById('flip-task-due');
+  var calCb  = document.getElementById('flip-task-cal');
+  var subjVal = subj ? subj.value.trim() : '';
+  var priVal  = pri  ? pri.value          : 'medium';
+  var dueVal  = due  ? due.value          : '';
+  var addCal  = calCb ? calCb.checked     : false;
+
+  // IMPORTANT: open the calendar URL synchronously inside the click handler
+  // so popup blockers don't kill it. Look up the class's start/end times so
+  // it becomes a timed event instead of all-day.
+  if (addCal){
+    var classTimes = findClassTimesForSubject(subjVal, dueVal);
+    openCalendarEvent(titleVal, dueVal, subjVal ? 'Subject: ' + subjVal : '', null, classTimes);
+  }
+
+  unflipWidget('tasks');
+
+  // Optimistic insert + replace temp id pattern (same as doAddTask)
+  var tempId = 'tmp-' + Date.now();
+  myTasks.unshift({id:tempId, title:titleVal, subject:subjVal, dueDate:dueVal, priority:priVal, status:'pending', notes:'', assignedBy:CU.email});
+  renderTasks();
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      for (var i = 0; i < myTasks.length; i++){
+        if (myTasks[i].id === tempId){ myTasks[i].id = r.id; break; }
+      }
+      if (prefs.taskActiveList && prefs.taskActiveList !== 'default'){
+        if (!prefs.taskListMap) prefs.taskListMap = {};
+        prefs.taskListMap[r.id] = prefs.taskActiveList;
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      }
+      renderTasks();
+      toast('Task added', 'ok');
+    } else {
+      myTasks = myTasks.filter(function(t){ return t.id !== tempId; });
+      renderTasks();
+      toast('Error saving task', 'err');
+    }
+  }).addMyTask(titleVal, subjVal, dueVal, priVal, '');
+}
+
+// Easter egg trigger: if any active task is titled exactly "put emojis
+// everywhere", flip body class and re-paint widgets so icons swap to emojis.
+// Marking that task complete turns the mode off again.
+function checkEmojiEasterEgg(){
+  var wasOn  = _emojiMode;
+  var active = myTasks.some(function(t){
+    return t.status !== 'completed' && t.status !== 'deleted'
+        && String(t.title || '').trim().toLowerCase() === 'put emojis everywhere';
+  });
+  _emojiMode = active;
+
+  if (wasOn !== active){
+    document.body.classList.toggle('emoji-mode', active);
+    if (active) toast('🎉 Emoji mode ON — mark task complete to turn off', 'inf');
+    else        toast('Emoji mode off', 'inf');
+    // Re-render so icon helpers (emo) pick up the new mode
+    var hp = document.getElementById('tp-home') || document.getElementById('tp-my-home');
+    if (hp && homeDataLoaded) reloadHomeWidgets();
+  }
+}
+
+// Returns an emoji char (when emoji-mode is on) or an inline SVG icon ref.
+// Used by widgets that want to swap their icons in emoji mode.
+function emo(char, fallbackSvgId){
+  if (_emojiMode && char) return char;
+  if (fallbackSvgId)      return '<svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#' + fallbackSvgId + '"/></svg>';
+  return '';
+}
+
+// Add a new task list (for the multi-list task tab bar). Auto-assigns
+// a color from TAB_COLORS by current list count.
+function addTaskList(){
+  var name = prompt('New list name:');
+  if (!name || !name.trim()) return;
+  var id    = 'tl-' + Date.now();
+  var color = TAB_COLORS[((prefs.taskLists || []).length) % TAB_COLORS.length];
+
+  if (!prefs.taskLists) prefs.taskLists = [{id:'default', name:'All Tasks', color:'#6366f1'}];
+  prefs.taskLists.push({id:id, name:name.trim(), color:color});
+  prefs.taskActiveList = id;
+
+  renderTaskTabBar();
+  renderTasks();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// ─── PART 2 ENDS HERE ───────────────────────────────────────────────
+// Continue reading? Sections 13–28 (notes, task/note tab bars, links,
+// weather, quote, timer, search, spotify, stocks, countdowns, lunch,
+// scores, helpers, calendar integration, home data load) come next.
+/* ═══════════════════════════════════════════════════════════════════
+   13. NOTES WIDGET
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Standalone notes loader. Used as a fallback when getHomeData fails.
+// Parses the serialized tab-keyed JSON format (see parseNotesData).
+function loadNotes(){
+  google.script.run.withSuccessHandler(function(r){
+    myNotes     = r.notes || '';
+    myNotesData = parseNotesData(myNotes);
+    renderNotesWidget();
+  }).getMyNotes();
+}
+
+// Render the notes tab bar + textarea content. If the active tab no
+// longer exists (e.g. user just deleted it), fall back to the first tab.
+function renderNotesWidget(){
+  var tabBar = document.getElementById('notes-tab-bar');
+  var ta     = document.getElementById('notes-ta');
+  if (!tabBar) return;
+
+  var tabs      = prefs.notesTabs || [{id:'default', name:'Notes', color:'#6366f1'}];
+  var activeTab = prefs.notesActiveTab || 'default';
+  if (!tabs.find(function(t){ return t.id === activeTab; })){
+    activeTab = tabs[0].id;
+    prefs.notesActiveTab = activeTab;
+  }
+
+  tabBar.innerHTML = tabs.map(function(t){
+    var a = t.id === activeTab;
+    return '<div class="wtab' + (a ? ' active' : '') + '" style="' + (a ? 'background:' + t.color + ';border-color:' + t.color + ';' : '') + '" onclick="switchNoteTab(\'' + t.id + '\')">'
+      + '<div class="wtab-dot" style="background:' + (a ? 'rgba(255,255,255,.7)' : t.color) + ';"></div>' + esc(t.name)
+      + '</div>';
+  }).join('') + '<div class="wtab-edit-btn" onclick="flipWidget(\'notes\')" title="Manage tabs">&#9998;</div>';
+
+  if (ta) ta.value = myNotesData[activeTab] || '';
+}
+
+// Parse the serialized notes blob. New format is JSON with _v=2 + a tabs map;
+// legacy format is a plain string that becomes the 'default' tab's body.
+function parseNotesData(raw){
+  if (!raw) return {default:''};
+  try {
+    var p = JSON.parse(raw);
+    if (p && p._v === 2 && p.tabs) return p.tabs;
+  } catch(e){}
+  return {default:raw};
+}
+
+// Switch the active notes tab. Saves the current tab's textarea value
+// into myNotesData first so we don't lose unsaved edits.
+function switchNoteTab(id){
+  var ta = document.getElementById('notes-ta');
+  if (ta) myNotesData[prefs.notesActiveTab || 'default'] = ta.value;
+  prefs.notesActiveTab = id;
+  renderNotesWidget();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   14. TASK + NOTE TAB BARS — shared helpers
+   Both the tasks widget and notes widget use a similar tab bar with
+   color cycling, inline rename, and add/delete. Helpers below are
+   shared between the two.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the task list's tab bar. Right-click on a tab opens a context menu.
+function renderTaskTabBar(){
+  var tabBar = document.getElementById('task-tab-bar');
+  if (!tabBar) return;
+
+  var lists      = prefs.taskLists || [{id:'default', name:'All Tasks', color:'#6366f1'}];
+  var activeList = prefs.taskActiveList || 'default';
+  if (!lists.find(function(l){ return l.id === activeList; })){
+    activeList = lists[0] ? lists[0].id : 'default';
+    prefs.taskActiveList = activeList;
+  }
+
+  tabBar.innerHTML = lists.map(function(l){
+    var a = l.id === activeList;
+    return '<div class="wtab' + (a ? ' active' : '') + '" style="' + (a ? 'background:' + l.color + ';border-color:' + l.color + ';' : '') + '"'
+      + ' onclick="switchTaskList(\'' + l.id + '\')" oncontextmenu="openTabCtx(event,\'task\',\'' + l.id + '\');return false;">'
+      + '<div class="wtab-dot" style="background:' + (a ? 'rgba(255,255,255,.7)' : l.color) + ';"></div>' + esc(l.name)
+      + '</div>';
+  }).join('') + '<div class="wtab-add" onclick="addTaskList()" title="New list">+</div>';
+}
+
+// Switch the currently-shown task list and re-render.
+function switchTaskList(id){
+  prefs.taskActiveList = id;
+  renderTaskTabBar();
+  renderTasks();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Cycle a color dot through TAB_COLORS. Used by both task and note tab editors.
+function cycleColor(el){
+  var idx  = TAB_COLORS.indexOf(el.dataset.color);
+  var next = TAB_COLORS[(idx + 1) % TAB_COLORS.length];
+  el.dataset.color = next;
+  el.style.background = next;
+}
+
+// Add a new note tab from the inline editor. Doesn't save yet — the
+// user has to click Save in the back panel; this just appends to the list.
+function addNoteTabInline(){
+  var inp  = document.getElementById('new-tab-name');
+  var name = inp ? inp.value.trim() : '';
+  if (!name){ toast('Enter a name', 'err'); return; }
+
+  var id    = 'nt-' + Date.now();
+  var color = TAB_COLORS[((prefs.notesTabs || []).length) % TAB_COLORS.length];
+  if (!prefs.notesTabs) prefs.notesTabs = [{id:'default', name:'Notes', color:'#6366f1'}];
+  prefs.notesTabs.push({id:id, name:name, color:color});
+  myNotesData[id] = '';
+
+  var back = document.getElementById('tb-notes');
+  if (back) back.innerHTML = WIDGET_BACK.notes();
+}
+
+// Add a new task list from the inline editor. Mirror of addNoteTabInline.
+function addListInline(){
+  var inp  = document.getElementById('new-list-name');
+  var name = inp ? inp.value.trim() : '';
+  if (!name){ toast('Enter a name', 'err'); return; }
+
+  var id    = 'tl-' + Date.now();
+  var color = TAB_COLORS[((prefs.taskLists || []).length) % TAB_COLORS.length];
+  if (!prefs.taskLists) prefs.taskLists = [{id:'default', name:'All Tasks', color:'#6366f1'}];
+  prefs.taskLists.push({id:id, name:name, color:color});
+
+  var back = document.getElementById('tb-tasks');
+  if (back) back.innerHTML = WIDGET_BACK.tasks();
+}
+
+// Save all note-tab edits from the inline editor (renames + recolors).
+function saveNoteTabsInline(){
+  var tabs = prefs.notesTabs || [];
+  tabs.forEach(function(t){
+    var inp = document.getElementById('ntn-' + t.id);
+    if (inp && inp.value.trim()) t.name = inp.value.trim();
+    var dot = document.querySelector('.color-dot[data-id="' + t.id + '"]');
+    if (dot) t.color = dot.dataset.color || t.color;
+  });
+  prefs.notesTabs = tabs;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('notes');
+  renderNotesWidget();
+  toast('Tabs saved', 'ok');
+}
+
+// Save all task-list edits from the inline editor. Mirror of saveNoteTabsInline.
+function saveListsInline(){
+  var lists = prefs.taskLists || [];
+  lists.forEach(function(l){
+    var inp = document.getElementById('tln-' + l.id);
+    if (inp && inp.value.trim()) l.name = inp.value.trim();
+    var dot = document.querySelector('.color-dot[data-id="' + l.id + '"]');
+    if (dot) l.color = dot.dataset.color || l.color;
+  });
+  prefs.taskLists = lists;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('tasks');
+  renderTaskTabBar();
+  renderTasks();
+  toast('Lists saved', 'ok');
+}
+
+// Delete a tab — works for both note tabs (type='note') and task lists (type='task').
+// Refuses to delete the last tab. Cleans up associated data: note bodies for
+// notes, taskListMap entries for tasks.
+function deleteTabInline(type, id){
+  if (type === 'note'){
+    var tabs = prefs.notesTabs || [];
+    if (tabs.length <= 1){ toast("Can't delete last tab", 'err'); return; }
+    prefs.notesTabs = tabs.filter(function(t){ return t.id !== id; });
+    if (prefs.notesActiveTab === id) prefs.notesActiveTab = prefs.notesTabs[0].id;
+    delete myNotesData[id];
+    myNotes = serializeNotesData(myNotesData);
+    google.script.run.saveMyNotes(myNotes);
+    var back = document.getElementById('tb-notes');
+    if (back) back.innerHTML = WIDGET_BACK.notes();
+  } else {
+    var lists = prefs.taskLists || [];
+    if (lists.length <= 1){ toast("Can't delete last list", 'err'); return; }
+    prefs.taskLists = lists.filter(function(l){ return l.id !== id; });
+    if (prefs.taskActiveList === id) prefs.taskActiveList = prefs.taskLists[0].id;
+    // Strip taskListMap entries pointing to the deleted list
+    if (prefs.taskListMap){
+      Object.keys(prefs.taskListMap).forEach(function(k){
+        if (prefs.taskListMap[k] === id) delete prefs.taskListMap[k];
+      });
+    }
+    var back = document.getElementById('tb-tasks');
+    if (back) back.innerHTML = WIDGET_BACK.tasks();
+  }
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   15. LINKS WIDGET
+   ─────────────────────────────────────────────────────────────────
+   ⚠️  PRE-EXISTING BUG (NOT FIXED IN THIS PASS):
+       This file contains TWO functions named renderLinks(). The first
+       (immediately below) renders the actual link list. The second
+       (further down — kept verbatim) is identical to renderNotesWidget
+       and operates on #notes-tab-bar. JS function-declaration hoisting
+       means the SECOND definition wins, so calls to renderLinks() in
+       the running app actually re-render the notes tab bar instead.
+       Likely a copy-paste error from a past edit.
+       Worth fixing in a separate pass: delete the second renderLinks().
+   ═══════════════════════════════════════════════════════════════════ */
+
+// First renderLinks — the "real" one that renders the link list.
+// CURRENTLY SHADOWED by the duplicate further down this file.
+function renderLinks(){
+  var el = document.getElementById('links-area');
+  if (!el) return;
+
+  if (!myLinks.length){
+    el.innerHTML = '<div class="empty"><p>No links yet.</p></div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="link-list">' + myLinks.map(function(l, i){
+    var href = l.url.startsWith('http') ? l.url : 'https://' + l.url;
+    return '<a href="' + esc(href) + '" target="_blank" class="link-row" title="' + esc(l.url) + '" style="text-decoration:none;color:inherit;">'
+      + '<div class="link-ico"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-link-bookmark"/></svg></div>'
+      + '<div class="link-body"><div class="link-name">' + esc(l.label) + '</div></div>'
+      + '<div class="link-acts"><button class="btn btn-danger btn-sm" onclick="event.preventDefault();event.stopPropagation();removeLink(' + i + ')"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button></div>'
+      + '</a>';
+  }).join('') + '</div>';
+}
+
+// Standalone link loader. Used as a fallback when getHomeData fails.
+function loadLinks(){
+  google.script.run.withSuccessHandler(function(r){
+    myLinks = r.links || [];
+    renderLinks();
+  }).getMyLinks();
+}
+
+// Add link via the modal form (m-ll, m-lu).
+function doAddLink(){
+  var label = document.getElementById('m-ll').value.trim();
+  var url   = document.getElementById('m-lu').value.trim();
+  if (!label || !url){ toast('Fill both fields', 'err'); return; }
+
+  myLinks.push({label:label, url:url.startsWith('http') ? url : 'https://' + url});
+  closeModal('link-modal');
+  document.getElementById('m-ll').value = '';
+  document.getElementById('m-lu').value = '';
+  renderLinks();
+  toast('Link saved', 'ok');
+  google.script.run.saveMyLinks(JSON.stringify(myLinks));
+}
+
+// Delete a link by index.
+function removeLink(i){
+  myLinks.splice(i, 1);
+  renderLinks();
+  if (CU && CU.role === 'teacher') loadMyAssignedLinks();
+  toast('Removed', 'inf');
+  google.script.run.saveMyLinks(JSON.stringify(myLinks));
+}
+
+// Save handler for the flip-back add-link form. Auto-prefixes https://
+// if the URL doesn't have a scheme. Re-loads teacher's assigned-links
+// list so newly-added links show up there too.
+function flipSaveLink(){
+  var label    = document.getElementById('flip-link-label');
+  var url      = document.getElementById('flip-link-url');
+  var labelVal = label ? label.value.trim() : '';
+  var urlVal   = url   ? url.value.trim()   : '';
+  if (!labelVal || !urlVal){ toast('Fill both fields', 'err'); return; }
+  if (!urlVal.startsWith('http')) urlVal = 'https://' + urlVal;
+
+  myLinks.push({label:labelVal, url:urlVal});
+  unflipWidget('links');
+  renderLinks();
+  if (CU && CU.role === 'teacher') loadMyAssignedLinks();
+  toast('Link saved', 'ok');
+  google.script.run.saveMyLinks(JSON.stringify(myLinks));
+}
+
+// ─── DUPLICATE renderLinks — see warning at section 15 header ─────────
+// This second definition is functionally identical to renderNotesWidget
+// and operates on the notes tab bar, NOT the links list. Due to JS
+// function-declaration hoisting, this is the version that ACTUALLY runs
+// when renderLinks() is called anywhere in the app.
+// Preserved verbatim per refactor rules. Kept as a clear reminder.
+function renderLinks(){
+  var tabBar = document.getElementById('notes-tab-bar');
+  var ta     = document.getElementById('notes-ta');
+  if (!tabBar) return;
+
+  var tabs      = prefs.notesTabs || [{id:'default', name:'Notes', color:'#6366f1'}];
+  var activeTab = prefs.notesActiveTab || 'default';
+  if (!tabs.find(function(t){ return t.id === activeTab; })){
+    activeTab = tabs[0].id;
+    prefs.notesActiveTab = activeTab;
+  }
+
+  tabBar.innerHTML = tabs.map(function(t){
+    var a = t.id === activeTab;
+    return '<div class="wtab' + (a ? ' active' : '') + '" style="' + (a ? 'background:' + t.color + ';border-color:' + t.color + ';' : '') + '" onclick="switchNoteTab(\'' + t.id + '\')">'
+      + '<div class="wtab-dot" style="background:' + (a ? 'rgba(255,255,255,.7)' : t.color) + ';"></div>' + esc(t.name)
+      + '</div>';
+  }).join('') + '<div class="wtab-edit-btn" onclick="flipWidget(\'notes\')" title="Manage tabs">&#9998;</div>';
+
+  if (ta) ta.value = myNotesData[activeTab] || '';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   16. WEATHER WIDGET
+   ─────────────────────────────────────────────────────────────────
+   Three views (today/5day/10day) use the same Open-Meteo API with
+   different params. Geolocation reverse-lookup goes through Nominatim
+   (OpenStreetMap). Both flip-back and modal-based setup paths exist;
+   the modal versions appear to be legacy (no obvious caller in this file).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Show a loading state then trigger fetchWeatherData. Called on every
+// home re-render, so it's safe to no-op when location hasn't been set.
+function loadWeather(){
+  if (!prefs.weatherLat || !prefs.weatherLon) return;
+  showWidgetLoader('weather', 'sm');
+  fetchWeatherData(prefs.weatherLat, prefs.weatherLon, prefs.weatherCity || '');
+}
+
+// Initial weather widget body — either a "loading" spinner (if location
+// is set) or a "set up weather" CTA.
+function renderWeatherInit(){
+  if (prefs.weatherLat && prefs.weatherLon){
+    return '<div class="weather-loading"><div class="spinner" style="margin:0 auto 8px;"></div>Loading weather...</div>';
+  }
+  return '<div style="text-align:center;padding:16px;"><p style="font-size:13px;color:var(--tx2);margin-bottom:14px;">Tap to set up weather.</p><button class="btn btn-primary" onclick="flipWidget(\'weather\')">Set Up Weather</button></div>';
+}
+
+// Switch between today/5day/10day views; persists to prefs and reloads.
+function setWeatherView(v){
+  prefs.weatherView = v;
+  document.querySelectorAll('.weather-vbtn').forEach(function(b){
+    b.className = 'btn btn-sm weather-vbtn ' + (b.dataset.view === v ? 'btn-primary' : 'btn-ghost');
+  });
+  loadWeather();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Fetch weather from Open-Meteo and render based on the current view mode.
+// Today view uses current_weather; multi-day uses daily forecast with
+// max/min temps and precipitation probability.
+function fetchWeatherData(lat, lon, city){
+  var vw = prefs.weatherView || 'today';
+  var el = document.getElementById('weather-body');
+  if (!el) return;
+  el.innerHTML = '<div class="weather-loading"><div class="spinner" style="margin:0 auto 8px;"></div>Loading...</div>';
+
+  // Build the right URL for the current view
+  var url;
+  if (vw === 'today'){
+    url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&current_weather=true&temperature_unit=fahrenheit&windspeed_unit=mph';
+  } else {
+    var days = vw === '5day' ? 5 : 10;
+    url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&temperature_unit=fahrenheit&timezone=auto&forecast_days=' + days;
+  }
+
+  fetch(url).then(function(r){ return r.json(); }).then(function(data){
+    if (vw === 'today'){
+      var cw   = data.current_weather;
+      var code = cw.weathercode;
+      var icon = WMO_ICONS[code] || '&#127777;';
+      var desc = WMO_DESC[code]  || '';
+      el.innerHTML = '<div class="weather-display">'
+        + '<div class="weather-icon">' + icon + '</div>'
+        + '<div class="weather-temp">' + toDisplayTemp(cw.temperature) + tempLabel() + '</div>'
+        + '<div class="weather-desc">' + desc + '</div>'
+        + '<div class="weather-city">' + (city || 'Your Location') + '</div>'
+        + '<div class="weather-meta"><div class="weather-meta-item">Wind: ' + Math.round(cw.windspeed) + ' mph</div></div>'
+        + '<button class="btn btn-ghost btn-sm" style="margin-top:12px;width:100%;" onclick="loadWeather()">Refresh</button>'
+        + '</div>';
+    } else {
+      // Multi-day: build a horizontally-scrollable column per day
+      var d    = data.daily;
+      var cols = d.time.length;
+      var html = '<div style="display:grid;grid-template-columns:repeat(' + cols + ',1fr);gap:4px;overflow-x:auto;">';
+      for (var i = 0; i < cols; i++){
+        var dt     = new Date(d.time[i] + 'T12:00:00');  // T12 avoids tz landmines
+        var dn     = DAYS[dt.getDay()].substring(0, 3);
+        var ico    = WMO_ICONS[d.weathercode[i]] || '&#127777;';
+        var precip = (d.precipitation_probability_max && d.precipitation_probability_max[i] != null) ? d.precipitation_probability_max[i] : null;
+        html += '<div style="text-align:center;padding:8px 3px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;">'
+          + '<div style="font-size:9px;font-weight:600;color:var(--a2);margin-bottom:3px;letter-spacing:.3px;">' + dn + '</div>'
+          + '<div style="font-size:18px;margin:2px 0;">' + ico + '</div>'
+          + '<div style="font-size:12px;font-weight:700;color:var(--tx);">' + toDisplayTemp(d.temperature_2m_max[i]) + tempLabel() + '</div>'
+          + '<div style="font-size:10px;color:var(--tx3);">' + toDisplayTemp(d.temperature_2m_min[i]) + tempLabel() + '</div>'
+          + (precip != null ? '<div style="font-size:9px;color:#38bdf8;margin-top:2px;">&#128167;' + precip + '%</div>' : '')
+          + '</div>';
+      }
+      html += '</div><button class="btn btn-ghost btn-sm" style="margin-top:10px;width:100%;" onclick="loadWeather()">Refresh</button>';
+      el.innerHTML = html;
+    }
+  }).catch(function(){
+    if (el) el.innerHTML = '<div class="weather-err">Could not load weather.</div>';
+  }).finally(function(){
+    hideWidgetLoader('weather');
+  });
+}
+
+// Use browser geolocation + reverse-lookup (Nominatim) to set lat/lon/city.
+// Falls back to an empty city string if the reverse-lookup fails.
+function flipGeoLocate(){
+  if (!navigator.geolocation){ toast('Geolocation not supported', 'err'); return; }
+  var btn = document.querySelector('#tb-weather .btn-primary');
+  if (btn) btn.textContent = 'Locating...';
+
+  navigator.geolocation.getCurrentPosition(function(pos){
+    var lat = pos.coords.latitude;
+    var lon = pos.coords.longitude;
+    prefs.weatherLat = lat;
+    prefs.weatherLon = lon;
+
+    fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lon + '&format=json')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var city = (d.address.city || d.address.town || d.address.village || '') + (d.address.state ? ', ' + d.address.state : '');
+        prefs.weatherCity = city;
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+        unflipWidget('weather');
+        loadWeather();
+      }).catch(function(){
+        prefs.weatherCity = '';
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+        unflipWidget('weather');
+        loadWeather();
+      });
+  }, function(){
+    toast('Could not get location. Try manual entry.', 'err');
+  });
+}
+
+// Geocode a typed city name via Nominatim search and save the result.
+function flipManualCity(){
+  var inp  = document.getElementById('flip-w-city');
+  var city = inp ? inp.value.trim() : '';
+  if (!city){ toast('Enter a city name', 'err'); return; }
+
+  fetch('https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(city) + '&format=json&limit=1')
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (!data.length){ toast('City not found', 'err'); return; }
+      prefs.weatherLat  = parseFloat(data[0].lat);
+      prefs.weatherLon  = parseFloat(data[0].lon);
+      prefs.weatherCity = city;
+      google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      unflipWidget('weather');
+      loadWeather();
+    }).catch(function(){
+      toast('Could not find city', 'err');
+    });
+}
+
+// ─── LEGACY MODAL-BASED WEATHER SETUP (likely dead) ────────────────────
+// The modal versions below mirror the flip-back versions but use a
+// 'weather-modal' overlay. No clear caller in the codebase. Preserved.
+
+// Legacy: geolocate + reverse-lookup → close modal + load weather.
+function useGeoLocation(){
+  if (!navigator.geolocation){ toast('Geolocation not supported', 'err'); return; }
+  navigator.geolocation.getCurrentPosition(function(pos){
+    var lat = pos.coords.latitude, lon = pos.coords.longitude;
+    prefs.weatherLat = lat; prefs.weatherLon = lon;
+    fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lon + '&format=json').then(function(r){ return r.json(); }).then(function(d){
+      var city = (d.address.city || d.address.town || d.address.village || '') + (d.address.state ? ', ' + d.address.state : '');
+      prefs.weatherCity = city;
+      google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      closeModal('weather-modal');
+      fetchWeatherData(lat, lon, city);
+    }).catch(function(){
+      prefs.weatherCity = '';
+      google.script.run.saveMyPrefs(JSON.stringify(prefs));
+      closeModal('weather-modal');
+      fetchWeatherData(lat, lon, '');
+    });
+  }, function(){ toast('Could not get location. Try manual entry.', 'err'); });
+}
+
+// Legacy: manual city geocoding via Nominatim → close modal + load weather.
+function useManualCity(){
+  var city = document.getElementById('w-city').value.trim();
+  if (!city){ toast('Enter a city name', 'err'); return; }
+  fetch('https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(city) + '&format=json&limit=1').then(function(r){ return r.json(); }).then(function(data){
+    if (!data.length){ toast('City not found.', 'err'); return; }
+    var lat = parseFloat(data[0].lat), lon = parseFloat(data[0].lon);
+    prefs.weatherLat = lat; prefs.weatherLon = lon; prefs.weatherCity = city;
+    google.script.run.saveMyPrefs(JSON.stringify(prefs));
+    closeModal('weather-modal');
+    fetchWeatherData(lat, lon, city);
+  }).catch(function(){ toast('Could not find city.', 'err'); });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   17. QUOTE WIDGET
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Pick a random quote from the QUOTES array (defined elsewhere) and
+// render it. Re-callable via the widget's "New" button.
+function newQuote(){
+  var el = document.getElementById('quote-body');
+  if (!el) return;
+  var q = QUOTES[Math.floor(Math.random() * QUOTES.length)];
+  el.innerHTML = '<div class="quote-text">' + esc(q.text) + '</div>'
+    + '<div class="quote-author">&mdash; ' + esc(q.author) + '</div>'
+    + '<span class="quote-cat">' + esc(q.cat) + '</span>';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   18. TIMER WIDGET
+   Two modes (timer = countdown, stopwatch = elapsed) × three styles
+   (circle / bar / minimal). Uses requestAnimationFrame for smooth ticks
+   and tracks elapsed time deltas via performance.now().
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Re-render the timer body for the current style + mode. Wires the
+// minute/second input listeners on the timer mode so editing them
+// updates the target on the fly while paused.
+function renderTimerBody(){
+  var el = document.getElementById('timer-widget-body');
+  if (!el) return;
+
+  var style   = prefs.timerStyle || 'circle';
+  var isTimer = timerState.mode === 'timer';
+  if (style === 'circle')      el.innerHTML = circleTimerHTML(isTimer);
+  else if (style === 'bar')    el.innerHTML = barTimerHTML(isTimer);
+  else                          el.innerHTML = minimalTimerHTML(isTimer);
+
+  // Live-update the target as the user types min/sec (timer mode only)
+  if (isTimer){
+    var mIn = document.getElementById('t-min');
+    var sIn = document.getElementById('t-sec');
+    if (mIn) mIn.addEventListener('input', function(){
+      timerState.target = (parseInt(mIn.value || 0) * 60 + parseInt(sIn.value || 0)) * 1000;
+      updateTimerDisplay();
+    });
+    if (sIn) sIn.addEventListener('input', function(){
+      timerState.target = (parseInt(mIn.value || 0) * 60 + parseInt(sIn.value || 0)) * 1000;
+      updateTimerDisplay();
+    });
+  }
+}
+
+// Switch between countdown timer and stopwatch. Resets all state.
+function setTimerMode(m){
+  timerState.mode    = m;
+  timerState.running = false;
+  timerState.elapsed = 0;
+  timerState.target  = 0;
+  timerState.laps    = [];
+  cancelAnimationFrame(timerState.raf);
+  document.getElementById('tt-timer').classList.toggle('active', m === 'timer');
+  document.getElementById('tt-sw').classList.toggle('active',    m === 'stopwatch');
+  renderTimerBody();
+}
+
+// Style A: circular SVG progress ring with center digit display.
+function circleTimerHTML(isTimer){
+  var inputRow = isTimer ? '<div class="timer-input-row"><input class="finp" type="number" id="t-min" min="0" max="99" value="5" placeholder="mm"><span>:</span><input class="finp" type="number" id="t-sec" min="0" max="59" value="0" placeholder="ss"></div>' : '';
+  var lapBtn   = isTimer ? '' : '<button class="btn btn-ghost btn-sm" onclick="timerLap()">Lap</button>';
+  var lapList  = isTimer ? '' : '<div class="lap-list" id="lap-list"></div>';
+  var startLbl = timerState.running ? 'Pause' : 'Start';
+  var subLbl   = isTimer ? 'countdown' : 'elapsed';
+  return '<div class="timer-circle-wrap">'
+    + '<div class="timer-svg-wrap"><svg width="140" height="140" viewBox="0 0 140 140">'
+    +   '<circle cx="70" cy="70" r="60" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="10"/>'
+    +   '<circle cx="70" cy="70" r="60" fill="none" stroke="var(--a1)" stroke-width="10" stroke-linecap="round" stroke-dasharray="377" stroke-dashoffset="0" id="timer-ring"/>'
+    + '</svg><div class="timer-center"><div class="timer-time-disp" id="timer-disp">00:00</div><div class="timer-label" id="timer-sub-lbl">' + subLbl + '</div></div></div>'
+    + inputRow
+    + '<div class="timer-controls"><button class="btn btn-ghost btn-sm" onclick="timerReset()">Reset</button><button class="btn btn-primary" id="timer-start-btn" onclick="timerToggle()">' + startLbl + '</button>' + lapBtn + '</div>'
+    + lapList
+    + '</div>';
+}
+
+// Style B: horizontal progress bar with digit display above.
+function barTimerHTML(isTimer){
+  var inputRow = isTimer ? '<div class="timer-input-row"><input class="finp" type="number" id="t-min" min="0" max="99" value="5" style="width:60px;text-align:center;"><span>:</span><input class="finp" type="number" id="t-sec" min="0" max="59" value="0" style="width:60px;text-align:center;"></div>' : '';
+  var lapBtn   = isTimer ? '' : '<button class="btn btn-ghost btn-sm" onclick="timerLap()">Lap</button>';
+  var lapList  = isTimer ? '' : '<div class="lap-list" id="lap-list"></div>';
+  var startLbl = timerState.running ? 'Pause' : 'Start';
+  return '<div class="timer-bar-wrap">' + inputRow
+    + '<div class="timer-bar-time" id="timer-disp">00:00</div>'
+    + '<div class="timer-bar-track"><div class="timer-bar-fill" id="timer-ring" style="width:0%"></div></div>'
+    + '<div class="timer-bar-controls"><button class="btn btn-ghost btn-sm" onclick="timerReset()">Reset</button><button class="btn btn-primary" id="timer-start-btn" onclick="timerToggle()">' + startLbl + '</button>' + lapBtn + '</div>'
+    + lapList
+    + '</div>';
+}
+
+// Style C: minimal — just the digits and controls, no progress visualization.
+function minimalTimerHTML(isTimer){
+  var inputRow = isTimer ? '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px;"><input class="finp" type="number" id="t-min" min="0" max="99" value="5" style="width:64px;text-align:center;font-size:16px;"><span style="align-self:center;color:var(--tx3);font-size:18px;">:</span><input class="finp" type="number" id="t-sec" min="0" max="59" value="0" style="width:64px;text-align:center;font-size:16px;"></div>' : '';
+  var lapBtn   = isTimer ? '' : '<button class="btn btn-ghost btn-sm" onclick="timerLap()">Lap</button>';
+  var lapList  = isTimer ? '' : '<div class="lap-list" id="lap-list"></div>';
+  var startLbl = timerState.running ? 'Pause' : 'Start';
+  return '<div class="timer-min-wrap">' + inputRow
+    + '<div class="timer-min-time" id="timer-disp">00:00</div>'
+    + '<div class="timer-min-controls"><button class="btn btn-ghost btn-sm" onclick="timerReset()">Reset</button><button class="btn btn-primary" id="timer-start-btn" onclick="timerToggle()">' + startLbl + '</button>' + lapBtn + '</div>'
+    + lapList
+    + '</div>';
+}
+
+// Last animation-frame timestamp — captured per tick to compute deltas.
+var _lastTs = null;
+
+// Toggle running state. Reads min/sec inputs into target on first start.
+function timerToggle(){
+  timerState.running = !timerState.running;
+  var btn = document.getElementById('timer-start-btn');
+  if (btn) btn.textContent = timerState.running ? 'Pause' : 'Start';
+
+  if (timerState.running){
+    // First start of a fresh timer — capture target from inputs
+    if (timerState.mode === 'timer' && timerState.elapsed === 0){
+      var mIn = document.getElementById('t-min');
+      var sIn = document.getElementById('t-sec');
+      timerState.target = ((parseInt(mIn ? mIn.value : 5) || 0) * 60 + (parseInt(sIn ? sIn.value : 0) || 0)) * 1000;
+    }
+    _lastTs = performance.now();
+    timerTick();
+  } else {
+    cancelAnimationFrame(timerState.raf);
+  }
+}
+
+// Animation-frame loop. Accumulates elapsed time as wall-clock deltas
+// (instead of counting frames) so it survives tab backgrounding.
+function timerTick(){
+  if (!timerState.running) return;
+  var now   = performance.now();
+  var delta = now - (_lastTs || now);
+  _lastTs   = now;
+  timerState.elapsed += delta;
+
+  // Countdown reached zero — auto-stop
+  if (timerState.mode === 'timer' && timerState.elapsed >= timerState.target){
+    timerState.elapsed = timerState.target;
+    timerState.running = false;
+    updateTimerDisplay();
+    var btn = document.getElementById('timer-start-btn');
+    if (btn) btn.textContent = 'Start';
+    toast("Time's up!", 'ok');
+    return;
+  }
+
+  updateTimerDisplay();
+  timerState.raf = requestAnimationFrame(timerTick);
+}
+
+// Repaint the digit display + progress visualization. Different progress
+// math depending on style (SVG dashoffset vs CSS width).
+function updateTimerDisplay(){
+  var isTimer = timerState.mode === 'timer';
+  // For countdown, show remaining; for stopwatch, show elapsed
+  var ms      = isTimer ? Math.max(0, timerState.target - timerState.elapsed) : timerState.elapsed;
+  var total   = Math.floor(ms / 1000);
+  var m       = Math.floor(total / 60);
+  var s       = total % 60;
+  var el      = document.getElementById('timer-disp');
+  if (el) el.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+
+  // Progress fraction (0..1)
+  var pct = timerState.target > 0
+    ? (isTimer ? 1 - timerState.elapsed / timerState.target : timerState.elapsed / timerState.target)
+    : 0;
+
+  var ring = document.getElementById('timer-ring');
+  if (ring){
+    var style = prefs.timerStyle || 'circle';
+    if (style === 'circle'){
+      // SVG circumference = 2πr where r=60 → 377
+      ring.setAttribute('stroke-dashoffset', (2 * Math.PI * 60) * (1 - Math.min(pct, 1)));
+    } else if (style === 'bar'){
+      ring.style.width = (Math.min(pct, 1) * 100) + '%';
+    }
+  }
+}
+
+// Reset timer state and clear lap list.
+function timerReset(){
+  cancelAnimationFrame(timerState.raf);
+  timerState.running = false;
+  timerState.elapsed = 0;
+  timerState.laps    = [];
+  updateTimerDisplay();
+  var btn = document.getElementById('timer-start-btn');
+  if (btn) btn.textContent = 'Start';
+  var ll = document.getElementById('lap-list');
+  if (ll) ll.innerHTML = '';
+}
+
+// Capture a lap (stopwatch mode only). Stores time-since-last-lap.
+function timerLap(){
+  if (!timerState.running && timerState.elapsed === 0) return;
+  var lapTime = timerState.elapsed - timerState.lapStart;
+  timerState.lapStart = timerState.elapsed;
+  var total = Math.floor(lapTime / 1000);
+  var m     = Math.floor(total / 60);
+  var s     = total % 60;
+  timerState.laps.push(String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0'));
+
+  var ll = document.getElementById('lap-list');
+  if (ll) ll.innerHTML = timerState.laps.map(function(l, i){
+    return '<div class="lap-row"><span>Lap ' + (i + 1) + '</span><span>' + l + '</span></div>';
+  }).reverse().join('');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   19. SEARCH WIDGET
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Send the input value to a Google search in a new tab and clear the field.
+function doGSearch(){
+  var q = document.getElementById('gsearch-inp');
+  if (!q || !q.value.trim()) return;
+  window.open('https://www.google.com/search?q=' + encodeURIComponent(q.value.trim()), '_blank');
+  q.value = '';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   20. SPOTIFY WIDGET
+   Two paths: the modern flip-back (flipSaveSpotify / flipClearSpotify,
+   in section 8) and the legacy modal (openSpotifySetup / saveSpotify
+   below). Both write to prefs.spotifyUrl.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Save handler for the flip-back form. Re-renders just the spotify
+// tile's front face (no full home reload needed).
+function flipSaveSpotify(){
+  var inp = document.getElementById('flip-spot-url');
+  prefs.spotifyUrl = inp ? inp.value.trim() : '';
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('spotify');
+  var tile = document.getElementById('tile-spotify');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front) try { front.innerHTML = WIDGET_HTML.spotify(); } catch(e){}
+  }
+  toast('Spotify saved', 'ok');
+}
+
+// Clear the saved Spotify URL and re-render to show the empty CTA again.
+function flipClearSpotify(){
+  prefs.spotifyUrl = '';
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('spotify');
+  var tile = document.getElementById('tile-spotify');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front) try { front.innerHTML = WIDGET_HTML.spotify(); } catch(e){}
+  }
+}
+
+// ─── LEGACY MODAL-BASED SPOTIFY SETUP ────────────────────────────────
+// Open a modal-based Spotify setup. No clear caller — flip-back is the
+// modern path. Preserved verbatim.
+function openSpotifySetup(){
+  var ov = document.createElement('div');
+  ov.className = 'overlay open';
+  ov.innerHTML = '<div class="mbox"><div class="mtitle">&#127925; Connect Spotify</div><p style="font-size:13px;color:var(--tx2);margin-bottom:14px;line-height:1.6;">In Spotify: right-click any song, album, or playlist &rarr; Share &rarr; Copy link. Paste it here.</p><div class="fg"><label class="flbl">Spotify URL</label><input class="finp" id="spot-url" placeholder="https://open.spotify.com/track/..." value="' + (prefs.spotifyUrl || '') + '"></div><div class="mfooter"><button class="btn btn-ghost" onclick="this.closest(\'.overlay\').remove()">Cancel</button><button class="btn btn-danger btn-sm" onclick="prefs.spotifyUrl=\'\';google.script.run.saveMyPrefs(JSON.stringify(prefs));this.closest(\'.overlay\').remove();reloadHomeWidgets();">Clear</button><button class="btn btn-primary" onclick="saveSpotify(this)">Save</button></div></div>';
+  document.body.appendChild(ov);
+}
+
+// Legacy: save and close the modal.
+function saveSpotify(btn){
+  prefs.spotifyUrl = document.getElementById('spot-url').value.trim();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  btn.closest('.overlay').remove();
+  reloadHomeWidgets();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   21. STOCKS WIDGET
+   Mirrors the spotify pattern: modern flip-back + legacy modal setup.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Save handler for the flip-back form. Re-renders just the stocks tile.
+function flipSaveStocks(){
+  var inp = document.getElementById('flip-stock-sym');
+  var sym = inp ? inp.value.trim().toUpperCase() : 'AAPL';
+  prefs.stockSymbols = sym || 'AAPL';
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('stocks');
+  var tile = document.getElementById('tile-stocks');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front) try { front.innerHTML = WIDGET_HTML.stocks(); } catch(e){}
+  }
+  toast('Stock updated', 'ok');
+}
+
+// ─── LEGACY MODAL-BASED STOCKS SETUP ─────────────────────────────────
+// Open a modal-based stocks setup. Preserved verbatim.
+function openStocksSetup(){
+  var ov = document.createElement('div');
+  ov.className = 'overlay open';
+  ov.innerHTML = '<div class="mbox"><div class="mtitle">&#128200; Stock Chart Setup</div><p style="font-size:13px;color:var(--tx2);margin-bottom:14px;line-height:1.6;">Enter a stock symbol. The chart will show the past month of price data.</p><div class="fg"><label class="flbl">Symbol (e.g. AAPL, TSLA, GOOGL)</label><input class="finp" id="stock-sym" placeholder="AAPL" value="' + (prefs.stockSymbols || 'AAPL') + '"></div><div class="mfooter"><button class="btn btn-ghost" onclick="this.closest(\'.overlay\').remove()">Cancel</button><button class="btn btn-primary" onclick="saveStocks(this)">Save</button></div></div>';
+  document.body.appendChild(ov);
+}
+
+// Legacy: save symbol and close modal.
+function saveStocks(btn){
+  prefs.stockSymbols = document.getElementById('stock-sym').value.trim().toUpperCase();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  btn.closest('.overlay').remove();
+  reloadHomeWidgets();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   22. COUNTDOWNS WIDGET
+   Stored in prefs.countdowns as {id, name, date (YYYY-MM-DD), emoji}.
+   Render sorts by absolute distance from today, with future dates first.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the countdown list. Sorts: future-dates-first (sorted by
+// nearest), then past-dates (sorted by most recent). Each row colors
+// "today" / "urgent within a week" / "past" differently.
+function renderCountdowns(){
+  var el = document.getElementById('cd-area');
+  if (!el) return;
+
+  var cds = prefs.countdowns || [];
+  if (!cds.length){
+    el.innerHTML = '<div class="empty"><p>No countdowns yet. Use the gear to add.</p></div>';
+    return;
+  }
+
+  // Anchor to start of today for stable comparisons
+  var now = new Date();
+  now.setHours(0, 0, 0, 0);
+
+  // Sort: future-first (a is future, b is past → -1), within each group by absolute distance
+  var sorted = cds.slice().sort(function(a, b){
+    var da = new Date(a.date + 'T00:00:00');
+    var db = new Date(b.date + 'T00:00:00');
+    var diffa = da - now;
+    var diffb = db - now;
+    if (diffa >= 0 && diffb < 0) return -1;
+    if (diffa < 0 && diffb >= 0) return  1;
+    return Math.abs(diffa) - Math.abs(diffb);
+  });
+
+  el.innerHTML = '<div class="cd-list">' + sorted.map(function(cd){
+    var target = new Date(cd.date + 'T00:00:00');
+    var diff   = Math.round((target - now) / (1000 * 60 * 60 * 24));
+
+    // Three render variants based on diff sign
+    var daysHtml;
+    if (diff === 0)      daysHtml = '<div class="cd-days today-cls">Today!<span class="cd-days-sub">is the day</span></div>';
+    else if (diff > 0)   daysHtml = '<div class="cd-days' + (diff <= 7 ? ' urgent' : '') + '">' + diff + '<span class="cd-days-sub">days away</span></div>';
+    else                  daysHtml = '<div class="cd-days past">' + Math.abs(diff) + '<span class="cd-days-sub">days ago</span></div>';
+
+    return '<div class="cd-item" onclick="openCdModal(\'' + cd.id + '\')">'
+      + '<div class="cd-emoji">' + (cd.emoji || '&#127881;') + '</div>'
+      + '<div class="cd-body"><div class="cd-name">' + esc(cd.name) + '</div><div class="cd-date-lbl">' + fmtDateFull(cd.date) + '</div></div>'
+      + daysHtml
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+// Open the countdown modal — for editing if id is passed, otherwise add.
+// Pre-fills name/date/emoji and toggles the delete button.
+function openCdModal(id){
+  cdEditId = id || null;
+  var cd = null;
+  if (id){
+    var cds = prefs.countdowns || [];
+    for (var i = 0; i < cds.length; i++){
+      if (cds[i].id === id){ cd = cds[i]; break; }
+    }
+  }
+  document.getElementById('cd-modal-title').innerHTML = (id ? '&#9200; Edit' : '&#9200; Add') + ' Countdown';
+  document.getElementById('cd-name').value = cd ? cd.name : '';
+  document.getElementById('cd-date').value = cd ? cd.date : '';
+
+  var er = document.getElementById('cd-emoji-row');
+  er.innerHTML = CD_EMOJIS.map(function(em){
+    return '<div class="em-opt' + (cd && cd.emoji === em ? ' sel' : '') + '" onclick="pickCdEmoji(this)" data-em="' + em + '">' + em + '</div>';
+  }).join('');
+
+  // Show the delete button only when editing
+  var dw = document.getElementById('cd-del-wrap');
+  if (dw) dw.style.display = id ? 'block' : 'none';
+  var db = document.getElementById('cd-del-btn');
+  if (db) db.onclick = function(){ deleteCd(id); };
+
+  openModal('cd-modal');
+}
+
+// Visually mark a picked emoji in the countdown modal's emoji row.
+function pickCdEmoji(el){
+  document.querySelectorAll('.em-opt').forEach(function(e){ e.classList.remove('sel'); });
+  el.classList.add('sel');
+}
+
+// Save the countdown modal — branches on cdEditId for edit-vs-add.
+function saveCd(){
+  var name = document.getElementById('cd-name').value.trim();
+  var date = document.getElementById('cd-date').value;
+  if (!name || !date){ toast('Fill in name and date', 'err'); return; }
+
+  var sel   = document.querySelector('.em-opt.sel');
+  var emoji = sel ? sel.dataset.em : '&#127881;';
+
+  if (!prefs.countdowns) prefs.countdowns = [];
+  if (cdEditId){
+    // Update existing in place
+    for (var i = 0; i < prefs.countdowns.length; i++){
+      if (prefs.countdowns[i].id === cdEditId){
+        prefs.countdowns[i] = {id:cdEditId, name:name, date:date, emoji:emoji};
+        break;
+      }
+    }
+    toast('Countdown updated', 'ok');
+  } else {
+    // New — id includes a random suffix to avoid same-millisecond collisions
+    prefs.countdowns.push({id:'cd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7), name:name, date:date, emoji:emoji});
+    toast('Countdown added!', 'ok');
+  }
+  closeModal('cd-modal');
+  renderCountdowns();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Delete a countdown by id.
+function deleteCd(id){
+  prefs.countdowns = (prefs.countdowns || []).filter(function(c){ return c.id !== id; });
+  closeModal('cd-modal');
+  renderCountdowns();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  toast('Removed', 'inf');
+}
+
+// Save handler for the flip-back countdown form (alternate add path).
+function flipSaveCd(){
+  var name    = document.getElementById('flip-cd-name');
+  var date    = document.getElementById('flip-cd-date');
+  var nameVal = name ? name.value.trim() : '';
+  var dateVal = date ? date.value         : '';
+  if (!nameVal || !dateVal){ toast('Fill in name and date', 'err'); return; }
+
+  var sel   = document.querySelector('#tb-countdowns .em-opt.sel');
+  var emoji = sel ? sel.dataset.em : '&#127881;';
+
+  if (!prefs.countdowns) prefs.countdowns = [];
+  prefs.countdowns.push({
+    id:    'cd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+    name:  nameVal,
+    date:  dateVal,
+    emoji: emoji
+  });
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('countdowns');
+  renderCountdowns();
+  toast('Countdown added!', 'ok');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   23. LUNCH WIDGET
+   _lunchData is populated by loadLunchMenu (called from the WIDGET_HTML
+   refresh button + initial render). Tabs show Mon-Fri of the current
+   week; weekends auto-display Monday's menu.
+   ═══════════════════════════════════════════════════════════════════ */
+
+var _lunchData = [];  // [{date, main, side1, side2, side3, veg, notes}, ...]
+var _lunchDay  = null; // currently-displayed day's YMD string
+
+// Fetch the school's lunch menu and re-render the day tabs.
+function loadLunchMenu(){
+  showWidgetLoader('lunch', 'sm');
+  google.script.run
+    .withSuccessHandler(function(rows){
+      _lunchData = rows || [];
+      buildLunchTabs();
+      hideWidgetLoader('lunch');
+    })
+    .withFailureHandler(function(){
+      var el = document.getElementById('lunch-body');
+      if (el) el.innerHTML = '<div class="lunch-empty">Could not load menu.</div>';
+      hideWidgetLoader('lunch');
+    })
+    .getLunchMenu();
+}
+
+// Render the Mon-Fri tab bar and pick a default day to display.
+// On weekends, defaults to Monday's menu.
+function buildLunchTabs(){
+  var tabs = document.getElementById('lunch-tabs');
+  var body = document.getElementById('lunch-body');
+  if (!tabs || !body) return;
+
+  var now = new Date();
+  var dow = now.getDay();
+  // Find Monday of this week
+  var mon = new Date(now);
+  mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
+
+  // Build Mon-Fri date list
+  var days = [];
+  for (var i = 0; i < 5; i++){
+    var d = new Date(mon);
+    d.setDate(mon.getDate() + i);
+    days.push(d);
+  }
+
+  var todayStr  = now.toISOString().slice(0, 10);
+  var DAY_SHORT = ['Mon','Tue','Wed','Thu','Fri'];
+
+  tabs.innerHTML = days.map(function(d, i){
+    var ds      = d.toISOString().slice(0, 10);
+    var isToday = ds === todayStr;
+    var cls     = 'lunch-day-btn' + (isToday ? ' today' : '');
+    // data-date + onclick="showLunchDay(this.dataset.date)" avoids quote-escaping nightmares
+    return '<button class="' + cls + '" data-date="' + ds + '" onclick="showLunchDay(this.dataset.date)">' + DAY_SHORT[i] + '<br><span style="font-size:9px;opacity:.7;">' + fmtDate(ds) + '</span></button>';
+  }).join('');
+
+  // Default day: today on weekdays, Monday on weekends
+  if (dow === 0 || dow === 6){ _lunchDay = days[0].toISOString().slice(0, 10); }
+  else                          { _lunchDay = todayStr; }
+  showLunchDay(_lunchDay);
+}
+
+// Render a specific day's lunch menu inside #lunch-body.
+function showLunchDay(dateStr){
+  _lunchDay = dateStr;
+
+  // Highlight active tab
+  document.querySelectorAll('.lunch-day-btn').forEach(function(b){
+    b.classList.toggle('active', b.dataset.date === dateStr);
+  });
+
+  var body = document.getElementById('lunch-body');
+  if (!body) return;
+
+  // Find the menu row for this date
+  var row = null;
+  for (var i = 0; i < _lunchData.length; i++){
+    if (_lunchData[i].date === dateStr){ row = _lunchData[i]; break; }
+  }
+  if (!row){ body.innerHTML = '<div class="lunch-empty">No menu posted for this day.</div>'; return; }
+
+  // Build the body — main, sides (filtered for non-empty), veg, notes
+  var html = '';
+  if (row.main) html += '<div class="lunch-main">' + esc(row.main) + '</div>';
+  var sides = [row.side1, row.side2, row.side3].filter(Boolean);
+  if (sides.length){ html += '<div class="lunch-sides">' + sides.map(function(s){ return '<div class="lunch-side">' + esc(s) + '</div>'; }).join('') + '</div>'; }
+  if (row.veg)   html += '<div class="lunch-veg">' + esc(row.veg) + '</div>';
+  if (row.notes) html += '<div class="lunch-side" style="margin-top:5px;">' + esc(row.notes) + '</div>';
+  if (!html) html = '<div class="lunch-empty">No items listed for this day.</div>';
+  body.innerHTML = html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   24. SCORES WIDGET
+   Renders a Lexile score line chart over 9 testing seasons (3 grades ×
+   3 seasons each). Pure SVG — no chart library. Shows an optional goal
+   as a dotted reference line.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the SVG line chart. Handles missing data points (broken lines),
+// auto-scales y-axis with padding, and renders grade-group bands across
+// the x-axis (6th / 7th / 8th).
+function renderScoresChart(){
+  var el = document.getElementById('scores-chart');
+  if (!el) return;
+
+  var data    = prefs.testingScores || {goal:null, entries:{}};
+  var entries = data.entries || {};
+  var goal    = data.goal ? Number(data.goal) : null;
+
+  // Canonical 9-season key order (must match the editor's grid)
+  var KEYS     = ['6-fall','6-winter','6-spring','7-fall','7-winter','7-spring','8-fall','8-winter','8-spring'];
+  var S_LABELS = ['Fall','Win','Spr','Fall','Win','Spr','Fall','Win','Spr'];
+  var G_LABELS = ['6th Grade','7th Grade','8th Grade'];
+
+  var vals    = KEYS.map(function(k){ return entries[k] ? Number(entries[k]) : null; });
+  var nonNull = vals.filter(function(v){ return v !== null; });
+
+  // No data + no goal → empty state
+  if (!nonNull.length && !goal){
+    el.innerHTML = '<div class="empty" style="padding:20px 0;"><div class="empty-ico">&#128200;</div><p style="font-size:12px;">Click &#9881; Edit to enter scores.</p></div>';
+    return;
+  }
+
+  // Y-axis range: pad max & min so points don't sit on the edges
+  var allVals = goal ? nonNull.concat([goal]) : nonNull;
+  var rawMax  = allVals.length ? Math.max.apply(null, allVals) : 1200;
+  var rawMin  = allVals.length ? Math.min.apply(null, allVals) : 400;
+  var pad     = Math.max(120, Math.ceil((rawMax - rawMin) * 0.25));
+  var maxV    = Math.ceil((rawMax + pad) / 50) * 50;
+  var minV    = Math.max(0, Math.floor((rawMin - pad) / 50) * 50);
+
+  // SVG layout — viewBox + padding for axes/labels
+  var W = 440, H = 210;
+  var PL = 58, PR = 18, PT = 22, PB = 50;
+  var cW = W - PL - PR;
+  var cH = H - PT - PB;
+  function toX(i){ return PL + i * (cW / 8); }       // 9 points → 8 intervals
+  function toY(v){ return PT + cH * (1 - (v - minV) / (maxV - minV)); }
+
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;overflow:visible;">';
+
+  // ── Y gridlines + tick labels (5 ticks) ──
+  for (var t = 0; t <= 4; t++){
+    var tv = Math.round(minV + (maxV - minV) * t / 4);
+    var ty = toY(tv);
+    svg += '<line x1="' + PL + '" y1="' + ty + '" x2="' + (W - PR) + '" y2="' + ty + '" stroke="rgba(255,255,255,.05)" stroke-width="1"/>';
+    svg += '<text x="' + (PL - 5) + '" y="' + (ty + 4) + '" fill="rgba(148,163,184,.55)" font-size="9" text-anchor="end" font-family="DM Sans,sans-serif">' + tv + '</text>';
+  }
+
+  // ── Grade group bands (6th/7th/8th — 3 seasons each) + separators ──
+  [[0,2],[3,5],[6,8]].forEach(function(b, gi){
+    var x1 = toX(b[0]) - (cW / 8) * 0.38;
+    var x2 = toX(b[1]) + (cW / 8) * 0.38;
+    svg += '<rect x="' + x1 + '" y="' + PT + '" width="' + (x2 - x1) + '" height="' + cH + '" rx="4" fill="rgba(255,255,255,.02)"/>';
+    svg += '<text x="' + ((toX(b[0]) + toX(b[1])) / 2) + '" y="' + (H - 7) + '" fill="var(--a2)" font-size="10" font-weight="600" text-anchor="middle" font-family="inherit" letter-spacing=".5">' + G_LABELS[gi] + '</text>';
+    // Dashed separator between groups (after 6th and 7th)
+    if (gi < 2){
+      var sx = toX(b[1]) + (cW / 8) * 0.5;
+      svg += '<line x1="' + sx + '" y1="' + PT + '" x2="' + sx + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.07)" stroke-width="1" stroke-dasharray="3,3"/>';
+    }
+  });
+
+  // ── Goal dotted reference line + label ──
+  if (goal){
+    var clampedG = Math.max(minV, Math.min(maxV, goal));
+    var gy = toY(clampedG);
+    svg += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="var(--a2)" stroke-width="1.5" stroke-dasharray="5,4" opacity=".9"/>';
+    svg += '<rect x="' + (W - PR - 36) + '" y="' + (gy - 11) + '" width="36" height="13" rx="3" fill="rgba(14,22,44,.85)"/>';
+    svg += '<text x="' + (W - PR - 4) + '" y="' + (gy - 2) + '" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="end" font-family="inherit">' + goal + ' L</text>';
+  }
+
+  // ── Build line segments — break at nulls so gaps don't draw thru ──
+  var segments = [], cur = [];
+  for (var i = 0; i < 9; i++){
+    if (vals[i] !== null){
+      cur.push({x:toX(i), y:toY(vals[i]), v:vals[i]});
+    } else {
+      if (cur.length) segments.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length) segments.push(cur);
+
+  // ── Area fill under each segment (gradient from accent color) ──
+  segments.forEach(function(seg, si){
+    if (seg.length < 1) return;
+    var gradId = 'areag' + si;
+    svg += '<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--a1)" stop-opacity=".3"/><stop offset="100%" stop-color="var(--a1)" stop-opacity=".01"/></linearGradient></defs>';
+    var aPath = 'M ' + seg[0].x + ' ' + (PT + cH);
+    seg.forEach(function(p){ aPath += ' L ' + p.x + ' ' + p.y; });
+    aPath += ' L ' + seg[seg.length - 1].x + ' ' + (PT + cH) + ' Z';
+    svg += '<path d="' + aPath + '" fill="url(#' + gradId + ')" />';
+  });
+
+  // ── Lines (drawn twice — once thick, once thin lighter for sheen) ──
+  segments.forEach(function(seg){
+    if (seg.length < 2) return;
+    var d = 'M ' + seg[0].x + ' ' + seg[0].y;
+    seg.forEach(function(p, pi){ if (pi > 0) d += ' L ' + p.x + ' ' + p.y; });
+    svg += '<path d="' + d + '" fill="none" stroke="var(--a1)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+    svg += '<path d="' + d + '" fill="none" stroke="var(--a2)" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" opacity=".45"/>';
+  });
+
+  // ── Dots, value labels, x-axis season labels (filled OR placeholder) ──
+  for (var i = 0; i < 9; i++){
+    var x = toX(i);
+    if (vals[i] !== null){
+      var y = toY(vals[i]);
+      svg += '<circle cx="' + x + '" cy="' + y + '" r="5" fill="var(--a1)" stroke="#0f172a" stroke-width="2.5"/>';
+      svg += '<circle cx="' + x + '" cy="' + y + '" r="2.5" fill="var(--a2)"/>';
+      // Drop the value label below the point if it would overflow the top
+      var lblY = (y < PT + 16) ? y + 16 : y - 8;
+      svg += '<text x="' + x + '" y="' + lblY + '" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="middle" font-family="inherit">' + vals[i] + '</text>';
+    } else {
+      // Placeholder dashed circle for missing seasons
+      svg += '<circle cx="' + x + '" cy="' + (PT + cH / 2) + '" r="3.5" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="1.5" stroke-dasharray="2,2"/>';
+    }
+    svg += '<text x="' + x + '" y="' + (PT + cH + 15) + '" fill="rgba(148,163,184,.6)" font-size="9" text-anchor="middle" font-family="inherit">' + S_LABELS[i] + '</text>';
+  }
+
+  // ── Axes + Y-axis "LEXILE" rotated label ──
+  svg += '<line x1="' + PL + '" y1="' + PT + '" x2="' + PL + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
+  svg += '<line x1="' + PL + '" y1="' + (PT + cH) + '" x2="' + (W - PR) + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
+  svg += '<text x="14" y="' + (PT + cH / 2) + '" fill="rgba(148,163,184,.55)" font-size="9" font-weight="600" letter-spacing="1" text-anchor="middle" font-family="inherit" transform="rotate(-90,14,' + (PT + cH / 2) + ')">LEXILE</text>';
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+
+// Save handler for the scores flip-back form. Reads all 9 entry inputs
+// + the goal input, filters to numeric values > 0, persists, re-renders chart.
+function saveScores(){
+  if (!prefs.testingScores) prefs.testingScores = {goal:null, entries:{}};
+
+  var entries = {};
+  var GRADES  = ['6','7','8'];
+  var SEASONS = ['fall','winter','spring'];
+  GRADES.forEach(function(g){
+    SEASONS.forEach(function(s){
+      var key = g + '-' + s;
+      var inp = document.getElementById('sc-inp-' + key);
+      var v   = inp ? inp.value.trim() : '';
+      if (v && !isNaN(Number(v)) && Number(v) > 0) entries[key] = Number(v);
+    });
+  });
+
+  var goalEl = document.getElementById('sc-goal');
+  var goalV  = goalEl ? goalEl.value.trim() : '';
+  prefs.testingScores = {
+    goal:    (goalV && !isNaN(Number(goalV)) && Number(goalV) > 0) ? Number(goalV) : null,
+    entries: entries
+  };
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('scores');
+
+  // Re-render just the scores tile
+  var tile = document.getElementById('tile-scores');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front) try { front.innerHTML = WIDGET_HTML.scores(); } catch(e){}
+  }
+  setTimeout(renderScoresChart, 60); // wait for layout to settle
+  toast('Scores saved', 'ok');
+}
+
+// Wipe all scores + goal. Confirms first.
+function clearScores(){
+  if (!confirm('Clear all saved scores and goal?')) return;
+  prefs.testingScores = {goal:null, entries:{}};
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  unflipWidget('scores');
+  var tile = document.getElementById('tile-scores');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front) try { front.innerHTML = WIDGET_HTML.scores(); } catch(e){}
+  }
+  toast('Scores cleared', 'inf');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   25. SUBJECT HELPERS
+   Subject color resolution (saved → hashed fallback) and the dropdown
+   builder used by task-add forms (deduped, with A/B-day annotation).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Resolve a color for a given subject. Saved prefs.subjectColors[subj]
+// wins; otherwise hash the subject name into TAB_COLORS for stability.
+function getSubjectColor(subject){
+  if (!subject) return '#6366f1';
+  var key = String(subject).trim();
+  if (prefs.subjectColors && prefs.subjectColors[key]) return prefs.subjectColors[key];
+
+  // Simple string hash → modulo into TAB_COLORS for a stable pseudo-random color
+  var h = 0;
+  for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  return TAB_COLORS[Math.abs(h) % TAB_COLORS.length];
+}
+
+// Get a deduped list of unique subjects from the schedule, with A/B-day
+// annotation when applicable. Strips [label](url) wrapping so the menu
+// shows clean labels.
+function getSubjectOptions(){
+  var subjects = [];
+  var seen     = {};
+  (mySchedule || []).forEach(function(p){
+    var subj = String(p.subject || '').trim();
+    // Strip [label](url) wrapping — we only want the label
+    var lm = subj.match(/^\[(.+?)\]\((https?:\/\/[^\)]+)\)$/);
+    if (lm) subj = lm[1];
+    if (subj && !seen[subj]){
+      seen[subj] = true;
+      subjects.push({label: p.abDay ? subj + ' (A)' : subj, value: subj, period: p.period});
+    }
+    // For A/B periods, also include the B-day subject (if different)
+    if (p.abDay){
+      var subjB = String(p.subjectB || '').trim();
+      var lmB = subjB.match(/^\[(.+?)\]\((https?:\/\/[^\)]+)\)$/);
+      if (lmB) subjB = lmB[1];
+      if (subjB && !seen[subjB]){
+        seen[subjB] = true;
+        subjects.push({label: subjB + ' (B)', value: subjB, period: p.period});
+      }
+    }
+  });
+  return subjects;
+}
+
+// Build <option> tags for a subject dropdown. Special-cases the current
+// value: if it's not in the schedule (e.g. a legacy task with a custom
+// subject), it gets prepended as a "(custom)" option so the user can
+// keep using it without forced re-mapping.
+function buildSubjectDropdownOptions(currentValue){
+  var opts = getSubjectOptions();
+  var html = '<option value="">— No subject —</option>';
+  var matched = false;
+
+  opts.forEach(function(o){
+    var sel = (o.value === currentValue) ? ' selected' : '';
+    if (sel) matched = true;
+    html += '<option value="' + esc(o.value) + '"' + sel + '>' + esc(o.label) + '</option>';
+  });
+
+  // Preserve unrecognized subjects so they stay selected
+  if (currentValue && !matched){
+    html = '<option value="' + esc(currentValue) + '" selected>' + esc(currentValue) + ' (custom)</option>' + html;
+  }
+  return html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   26. DATE/TIME HELPERS
+   Local-timezone formatters used by both the calendar tab and task
+   add forms. Note: the calendar tab's index_calendar.html has its
+   own copies of these (they live there too — not a duplicate, just
+   parallel definitions for separation of concerns).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Format a Date as YYYY-MM-DD in LOCAL time. Avoids UTC conversion
+// issues that plague Date.prototype.toISOString().slice(0,10).
+function _ymdLocal(d){
+  var y  = d.getFullYear();
+  var m  = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
+// Format a Date as a time string honoring prefs.timeFormat.
+// 24h: "HH:MM"  /  12h: "H:MMam" or "Ham" (drops :00)
+function _fmtTimeLocal(d){
+  var h = d.getHours(), m = d.getMinutes();
+  if (prefs.timeFormat === '24h') return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  var ap = h >= 12 ? 'pm' : 'am';
+  h = h % 12 || 12;
+  return h + (m === 0 ? '' : ':' + String(m).padStart(2, '0')) + ap;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   27. CALENDAR INTEGRATION
+   findClassTimesForSubject is used by task-add flows to auto-time a
+   calendar event using the user's class schedule. openCalendarEvent
+   wraps the server-side createCalendarEvent call with proper start/end
+   ISO strings + guest list + cache invalidation.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Look up the user's start/end times for a given subject on a given date.
+// Uses bell schedule period times when an override is active, otherwise
+// the user's saved per-period times. Returns null if no match.
+function findClassTimesForSubject(subject, dueDate){
+  if (!subject || !mySchedule || !mySchedule.length) return null;
+
+  // Determine effective day type. Today's bell schedule's dayType wins;
+  // defaults to 'A' for non-AB schedules.
+  // FUTURE: could look up the bell schedule for the actual due date,
+  // but most tasks are for soon-upcoming dates so today's day type is fine.
+  var dayType = 'A';
+  if (dueDate && activeBell){
+    dayType = (activeBell.dayType || 'A').toUpperCase();
+    if (dayType !== 'A' && dayType !== 'B') dayType = 'A';
+  }
+
+  for (var i = 0; i < mySchedule.length; i++){
+    var p = mySchedule[i];
+    // Strip [label](url) wrapping from both A and B subjects for matching
+    var subjA = String(p.subject  || '').replace(/^\[(.+?)\]\(.+\)$/, '$1').trim();
+    var subjB = String(p.subjectB || '').replace(/^\[(.+?)\]\(.+\)$/, '$1').trim();
+    if (subjA === subject || subjB === subject){
+      // Bell schedule times override the saved times when active
+      var startT = p.startTime;
+      var endT   = p.endTime;
+      if (activeBell && activeBell.schedule && activeBell.schedule.periods){
+        for (var j = 0; j < activeBell.schedule.periods.length; j++){
+          if (String(activeBell.schedule.periods[j].period) === String(p.period)){
+            startT = activeBell.schedule.periods[j].startTime || startT;
+            endT   = activeBell.schedule.periods[j].endTime   || endT;
+            break;
+          }
+        }
+      }
+      if (startT && endT) return {startTime:startT, endTime:endT};
+    }
+  }
+  return null;
+}
+
+// Create a Google Calendar event server-side. Builds proper ISO strings
+// based on whether classTimes was provided (timed event) or not (all-day).
+// Busts the calendar tab's event cache on success so newly-added events
+// show up the next time the user opens that tab.
+function openCalendarEvent(title, dueDate, details, guestEmails, classTimes){
+  if (!title)   { toast('Need a title to create event',    'err'); return; }
+  if (!dueDate) { toast('Need a due date to create event', 'err'); return; }
+
+  // Build ISO strings + allDay flag
+  var startISO, endISO;
+  var allDay = false;
+  if (classTimes && classTimes.startTime && classTimes.endTime){
+    // Timed event — combine due date with class start/end times
+    var sParts = classTimes.startTime.split(':');
+    var eParts = classTimes.endTime.split(':');
+    var sd = new Date(dueDate + 'T00:00:00');
+    sd.setHours(parseInt(sParts[0], 10), parseInt(sParts[1], 10), 0, 0);
+    var ed = new Date(dueDate + 'T00:00:00');
+    ed.setHours(parseInt(eParts[0], 10), parseInt(eParts[1], 10), 0, 0);
+    startISO = sd.toISOString();
+    endISO   = ed.toISOString();
+  } else {
+    // All-day event — start = due date, end = next day (Google Calendar
+    // conventions for all-day events use exclusive end dates)
+    startISO = dueDate;
+    var ed = new Date(dueDate + 'T00:00:00');
+    ed.setDate(ed.getDate() + 1);
+    endISO = _ymdLocal(ed);
+    allDay = true;
+  }
+
+  var opts = {
+    description: details || '',
+    allDay:      allDay,
+    guests:      (guestEmails && guestEmails.length) ? guestEmails : []
+  };
+
+  toast('Adding to Google Calendar…', 'inf');
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (r && r.success){
+        toast('Added to Google Calendar', 'ok');
+        // Bust the calendar tab's cache so the new event shows up next visit
+        if (typeof _calCache !== 'undefined') _calCache = {};
+      } else {
+        toast((r && r.error) || 'Could not add event', 'err');
+      }
+    })
+    .withFailureHandler(function(e){
+      toast('Could not add event: ' + (e && e.message ? e.message : 'unknown error'), 'err');
+    })
+    .createCalendarEvent(title, startISO, endISO, JSON.stringify(opts));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   28. HOME DATA LOAD
+   loadHomeData is the bulk loader called once at boot. Sets the
+   homeDataLoaded flag so subsequent buildHomePage calls skip the load.
+   refreshScheduleData is the auto-refresher (registered for the
+   schedule widget; runs every 10 minutes via registerAutoRefresh).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Single-shot loader — pulls tasks + schedule + notes + links + embedded
+// docs + bell schedules in one round trip. Falls back to four separate
+// calls if the combined endpoint fails.
+function loadHomeData(){
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (!r || r.error){
+        // No data → still render whatever's locally cached
+        renderTasks(); renderSchedule(); renderLinks(); renderCountdowns();
+        return;
+      }
+      myTasks         = r.tasks         || [];
+      mySchedule      = r.schedule      || [];
+      myNotes         = r.notes         || '';
+      myLinks         = r.links         || [];
+      myEmbeddedDocs  = r.embeddedDocs  || [];
+      bellSchedules   = r.bellSchedules || [];
+      activeBell      = r.activeBell    || null;
+      myNotesData     = parseNotesData(myNotes);
+      homeDataLoaded  = true;
+
+      // Reconcile embed tiles before render so deleted docs disappear cleanly
+      syncEmbedTiles();
+
+      renderTasks();
+      renderSchedule();
+      renderLinks();
+      renderCountdowns();
+      renderNotesWidget();
+
+      // Schedule refreshes itself every 10 minutes (handles bell-schedule changes)
+      registerAutoRefresh('schedule', refreshScheduleData, 10);
+    })
+    .withFailureHandler(function(){
+      // Fallback path: four separate calls when getHomeData fails
+      google.script.run.withSuccessHandler(function(ts){ myTasks    = ts || [];          renderTasks();          }).getMyTasks();
+      google.script.run.withSuccessHandler(function(r){  mySchedule = r.schedule || [];  renderSchedule();       }).getMySchedule();
+      google.script.run.withSuccessHandler(function(r){  myNotes    = r.notes || '';     myNotesData = parseNotesData(myNotes); renderNotesWidget(); }).getMyNotes();
+      google.script.run.withSuccessHandler(function(r){  myLinks    = r.links || [];     renderLinks();          }).getMyLinks();
+      renderCountdowns();
+    })
+    .getHomeData();
+}
+
+// Auto-refresh the schedule widget — called every 10 min by the
+// auto-refresh runner. Uses today's date string to fetch the current
+// bell schedule + day type. Only re-renders if the schedule widget is visible.
+function refreshScheduleData(){
+  var today = new Date();
+  var ds    = today.getFullYear() + '-'
+            + String(today.getMonth() + 1).padStart(2, '0') + '-'
+            + String(today.getDate()).padStart(2, '0');
+  google.script.run.withSuccessHandler(function(r){
+    if (!r) return;
+    mySchedule    = r.schedule      || [];
+    bellSchedules = r.bellSchedules || [];
+    activeBell    = r.activeBell    || null;
+    if (prefs.tileOrder.indexOf('schedule') > -1) renderSchedule();
+    hideWidgetLoader('schedule');
+  }).withFailureHandler(function(){
+    hideWidgetLoader('schedule');
+  }).getMyScheduleWithBell(ds);
+}
+
+</script>

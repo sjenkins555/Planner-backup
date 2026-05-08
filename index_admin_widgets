@@ -1,0 +1,1267 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_admin_widgets.html — ADMIN TAB CHUNK
+   ║  ─────────────────────────────────────────
+   ║  Owns the entire Admin tab: 9 widgets in a draggable/resizable grid.
+   ║  Only renders for users with realRole === 'teacher' (router enforces this).
+   ║
+   ║  Widgets (admin tile IDs):
+   ║    abell      — Bell Schedules
+   ║    aschedcal  — Schedule Calendar (which bells apply on which dates)
+   ║    astats     — Spreadsheet Health
+   ║    arepair    — Repair Sheets
+   ║    alunch     — Lunch Menu Import
+   ║    agrad      — Graduate Students
+   ║    arow       — ROW Reward Accounts (admin view)
+   ║    arem       — School-Wide Reminders
+   ║    aclean     — Data Cleanup
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. STATE (caches + UI flags)
+   ║   2. PAGE BUILDER (buildAdminPage)
+   ║   3. TILE SIZE PICKER (openASzPicker, pickASz)
+   ║   4. WIDGET RENDERERS — shell HTML for each of the 9 widgets
+   ║   5. SCHOOL-WIDE REMINDERS (doSendSchoolReminder)
+   ║   6. SPREADSHEET HEALTH STATS (loadAdminStats)
+   ║   7. LUNCH MENU IMPORT (doLunchImport)
+   ║   8. REPAIR SHEETS (doRepairSheets)
+   ║   9. DATA CLEANUP (doDataCleanup)
+   ║  10. BELL SCHEDULES — list + load + delete + set default
+   ║  11. BELL SCHEDULES — editor modal (open, period rows, save)
+   ║  12. SCHEDULE CALENDAR — month grid + navigation
+   ║  13. SCHEDULE CALENDAR — per-date entry modal
+   ║  14. SCHEDULE CALENDAR — bulk-assign modal
+   ║  15. GRADUATE STUDENTS (load list, select, remove)
+   ║  16. ROW REWARDS ADMIN — accounts (load, render, search, adjust)
+   ║  17. ROW REWARDS ADMIN — recent transactions
+   ║  18. HELPERS (Utilities_format date formatter)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. STATE
+   These caches let widgets share data without re-fetching across
+   re-renders within a single Admin tab session.
+   ═══════════════════════════════════════════════════════════════════ */
+var _bellSchedulesCache = []; // current bell schedules (refreshed by loadBellSchedules)
+var _editingBellId      = null; // which bell is open in the editor modal (null = new)
+var _schedCalDate       = null; // first day of currently-shown calendar month
+var _gradStudents       = []; // student list for the Graduate widget
+var _rowAdminAccounts   = []; // ROW account list for admin search/filter
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. PAGE BUILDER
+   Builds the 9-widget grid for the Admin tab. Each tile gets a
+   resize gear; ordering and sizes persist via prefs.adminTileOrder
+   and prefs.adminTileSizes.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Build the entire Admin tab. Renders an empty grid first, then fires each
+// widget's render function in a 50ms setTimeout so the grid paints before
+// any async data loads kick in.
+function buildAdminPage(){
+  // Tile definitions — one per admin widget
+  var tileDefs = {
+    abell:     {fn:renderABellWidget,     title:'Bell Schedules',         svg:'#w-schedule', defC:2, defR:2},
+    aschedcal: {fn:renderASchedCalWidget, title:'Schedule Calendar',      svg:'#w-schedule', defC:4, defR:2},
+    astats:    {fn:renderAStatsWidget,    title:'Spreadsheet Health',     svg:'#w-apps',     defC:2, defR:1},
+    arepair:   {fn:renderARepairWidget,   title:'Repair Sheets',          svg:'#w-admin',    defC:2, defR:1},
+    alunch:    {fn:renderALunchWidget,    title:'Lunch Menu Import',      svg:'#w-embed',    defC:4, defR:2},
+    agrad:     {fn:renderAGradWidget,     title:'Graduate Students',      svg:'#w-student',  defC:2, defR:2},
+    arow:      {fn:renderARowWidget,      title:'ROW Reward Accounts',    svg:'#w-student',  defC:4, defR:2},
+    arem:      {fn:renderARemWidget,      title:'School-Wide Reminders',  svg:'#w-timer',    defC:2, defR:2},
+    aclean:    {fn:renderACleanWidget,    title:'Data Cleanup',           svg:'#w-admin',    defC:4, defR:2}
+  };
+
+  // Reconcile saved order with the canonical default order:
+  // - Drop any tile IDs that no longer exist (older prefs)
+  // - Append any new tiles that weren't in the saved order
+  var defaultOrder = ['abell','astats','arepair','aschedcal','alunch','agrad','arow','arem','aclean'];
+  if (!prefs.adminTileOrder || !prefs.adminTileOrder.length){
+    prefs.adminTileOrder = defaultOrder.slice();
+  } else {
+    var saved = prefs.adminTileOrder.filter(function(id){ return tileDefs[id]; });
+    defaultOrder.forEach(function(id){ if (saved.indexOf(id) === -1) saved.push(id); });
+    prefs.adminTileOrder = saved;
+  }
+  if (!prefs.adminTileSizes) prefs.adminTileSizes = {};
+
+  // Draw the empty grid + tile shells
+  panel('t-admin').innerHTML = '<div class="tile-grid" id="a-tile-grid" style="grid-auto-rows:minmax(180px,auto);"></div>';
+  var grid = document.getElementById('a-tile-grid');
+  if (!grid) return;
+
+  grid.innerHTML = prefs.adminTileOrder.map(function(id){
+    var t = tileDefs[id];
+    if (!t) return '';
+    var sz = prefs.adminTileSizes[id] || {c:t.defC, r:t.defR};
+    var colSpan = Math.min(Math.max(sz.c || t.defC, 1), 4);
+    var rowSpan = Math.min(Math.max(sz.r || t.defR, 1), 3);
+    var minH = (rowSpan * 180) + ((rowSpan - 1) * 14);
+
+    return '<div class="tile" id="tile-' + id + '" draggable="true" data-tile="' + id + '" '
+      + 'style="grid-column:span ' + colSpan + ';grid-row:span ' + rowSpan + ';min-height:' + minH + 'px;">'
+      + '<div class="card" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">'
+      +   '<div class="card-top">'
+      +     '<div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="' + t.svg + '"/></svg> ' + t.title + '</div>'
+      +     '<div class="tile-gear" onclick="openASzPicker(\'' + id + '\',event)" title="Resize"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4M3 3v4M13 13h-4M13 13v-4M3 13h4M3 13v-4M13 3h-4M13 3v4"/></svg></div>'
+      +   '</div>'
+      +   '<div class="t-widget-body t-widget-scroll" id="aw-' + id + '"><div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading...</div></div>'
+      + '</div></div>';
+  }).join('');
+
+  // Defer widget renders so the DOM has time to paint shells first.
+  // Each renderer's errors are isolated so one bad widget doesn't kill the page.
+  setTimeout(function(){
+    prefs.adminTileOrder.forEach(function(id){
+      var t = tileDefs[id];
+      if (!t) return;
+      try {
+        t.fn();
+      } catch(e){
+        var el = document.getElementById('aw-' + id);
+        if (el) el.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">Error: ' + esc(e.message) + '</div>';
+        console.error(e);
+      }
+    });
+    initDragDrop();
+  }, 50);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. TILE SIZE PICKER
+   Floating popup over a tile's gear icon with a 4×2 grid of size choices.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the size picker for an admin tile. Clicking the same tile's gear
+// twice closes the popup; clicking outside also closes.
+function openASzPicker(id, evt){
+  evt.stopPropagation();
+  // Close any existing popup first; if it was for the same tile, just close
+  var old = document.getElementById('sz-pop');
+  if (old){ old.remove(); if (old.dataset.wid === id) return; }
+
+  // Default sizes (must match buildAdminPage's tileDefs)
+  var defs = {abell:{c:2,r:2},aschedcal:{c:4,r:2},astats:{c:2,r:1},arepair:{c:2,r:1},alunch:{c:4,r:2},agrad:{c:2,r:2},arow:{c:4,r:2},arem:{c:2,r:2},aclean:{c:4,r:2}};
+  var cur = Object.assign({}, defs[id] || {c:2,r:2}, (prefs.adminTileSizes && prefs.adminTileSizes[id]) || {});
+
+  // Build the popup
+  var pop = document.createElement('div');
+  pop.id = 'sz-pop';
+  pop.dataset.wid = id;
+  pop.className = 'sz-pop';
+  var html = '<div class="sz-pop-title">Size (cols \u00d7 rows)</div><div class="sz-grid">';
+  for (var r = 1; r <= 2; r++){
+    for (var c = 1; c <= 4; c++){
+      var isSel = (c === cur.c && r === cur.r) ? ' sel' : '';
+      html += '<div class="sz-cell' + isSel + '" onclick="pickASz(\'' + id + '\',' + c + ',' + r + ')">' + c + '\u00d7' + r + '</div>';
+    }
+  }
+  html += '</div>';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+
+  // Position the popup near the tile's gear, clamped to viewport
+  var tile  = document.getElementById('tile-' + id);
+  var tRect = tile ? tile.getBoundingClientRect() : {top:100, bottom:300, left:100, right:400};
+  var popW = 215, popH = 152;
+  var left = tRect.right - popW - 14;
+  var top  = tRect.bottom - popH - 44;
+  if (left < tRect.left + 8) left = tRect.left + 8;
+  if (top  < tRect.top  + 8) top  = tRect.top  + 8;
+  if (left + popW > window.innerWidth  - 8) left = window.innerWidth  - popW - 8;
+  if (top  + popH > window.innerHeight - 8) top  = window.innerHeight - popH - 8;
+  if (left < 8) left = 8;
+  if (top  < 8) top  = 8;
+  pop.style.top  = top  + 'px';
+  pop.style.left = left + 'px';
+
+  // Click-outside to close (registered with a tiny delay so this click doesn't trigger it)
+  setTimeout(function(){
+    function away(e){ if (!pop.contains(e.target)){ pop.remove(); document.removeEventListener('click', away); } }
+    document.addEventListener('click', away);
+  }, 10);
+}
+
+// User picked a size from the popup → save to prefs, update the tile's
+// CSS spans, persist prefs to server.
+function pickASz(id, cols, rows){
+  if (!prefs.adminTileSizes) prefs.adminTileSizes = {};
+  prefs.adminTileSizes[id] = {c:cols, r:rows};
+
+  var tile = document.getElementById('tile-' + id);
+  if (tile){
+    var minH = (rows * 180) + ((rows - 1) * 14);
+    tile.style.gridColumn = 'span ' + cols;
+    tile.style.gridRow    = 'span ' + rows;
+    tile.style.minHeight  = minH + 'px';
+  }
+
+  var pop = document.getElementById('sz-pop');
+  if (pop) pop.remove();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. WIDGET RENDERERS
+   Each function paints the widget body's static HTML shell, then
+   triggers async loads where applicable. These run from buildAdminPage's
+   setTimeout so the grid is already on screen.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Bell Schedules widget — header + button + list area; loads schedules.
+function renderABellWidget(){
+  var el = document.getElementById('aw-abell');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 4px;">'
+    +   '<div style="font-size:11px;color:var(--tx3);">Define schedules. Set a default.</div>'
+    +   '<button class="btn btn-primary btn-sm" onclick="openBellEditor()">+ New</button>'
+    + '</div>'
+    + '<div id="bell-list" style="display:flex;flex-direction:column;gap:6px;padding:0 4px;"><div style="color:var(--tx4);font-size:12px;text-align:center;padding:10px;">Loading...</div></div>';
+  loadBellSchedules();
+}
+
+// Schedule Calendar widget — header + Bulk/refresh buttons; renders calendar.
+function renderASchedCalWidget(){
+  var el = document.getElementById('aw-aschedcal');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 4px;">'
+    +   '<div style="font-size:11px;color:var(--tx3);">Click a date to assign a bell schedule.</div>'
+    +   '<div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="openBulkBellAssign()">Bulk</button><button class="btn btn-ghost btn-sm" onclick="renderSchedCalendar()">\u21bb</button></div>'
+    + '</div>'
+    + '<div id="sched-cal-area" style="padding:0 4px;"></div>';
+  renderSchedCalendar();
+}
+
+// Spreadsheet Health widget — header + refresh button; loads stats.
+function renderAStatsWidget(){
+  var el = document.getElementById('aw-astats');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 4px;">'
+    +   '<div style="font-size:11px;color:var(--tx3);">Sheet health overview.</div>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="loadAdminStats()">\u21bb Refresh</button>'
+    + '</div>'
+    + '<div id="stats-body" style="font-size:13px;color:var(--tx3);padding:0 4px;">Click Refresh to load stats.</div>';
+  loadAdminStats();
+}
+
+// Repair Sheets widget — explanatory text + Run button (no auto-load).
+function renderARepairWidget(){
+  var el = document.getElementById('aw-arepair');
+  if (!el) return;
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);margin-bottom:8px;padding:0 4px;line-height:1.5;">Adds missing sheets without touching data.</div>'
+    + '<div style="padding:0 4px;"><button class="btn btn-primary btn-sm" id="repair-btn" onclick="doRepairSheets()">\u{1F527} Run Repair</button></div>'
+    + '<div id="repair-result" style="margin-top:10px;padding:0 4px;"></div>';
+}
+
+// Lunch Menu Import widget — paste-text textarea + Import button.
+function renderALunchWidget(){
+  var el = document.getElementById('aw-alunch');
+  if (!el) return;
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);line-height:1.6;margin-bottom:8px;padding:0 4px;">'
+    +   'Paste menu text from the PDF. Each day starts with a main + day-of-month, sides on separate lines, ending with "Milk". Month is inferred from today.'
+    + '</div>'
+    + '<div style="padding:0 4px;">'
+    +   '<textarea class="fta" id="lunch-import-ta" placeholder="\u2014Paste menu text here\u2014" style="width:100%;min-height:160px;font-family:\'DM Mono\',monospace;font-size:12px;"></textarea>'
+    +   '<div style="display:flex;gap:8px;margin-top:8px;">'
+    +     '<button class="btn btn-primary btn-sm" onclick="doLunchImport()">Import</button>'
+    +     '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'lunch-import-ta\').value=\'\'">Clear</button>'
+    +   '</div>'
+    +   '<div id="lunch-import-result" style="margin-top:10px;"></div>'
+    + '</div>';
+}
+
+// Graduate Students widget — load button + selectable list + remove button.
+function renderAGradWidget(){
+  var el = document.getElementById('aw-agrad');
+  if (!el) return;
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);line-height:1.5;margin-bottom:8px;padding:0 4px;">Permanently remove students. <strong>Cannot be undone.</strong></div>'
+    + '<div style="padding:0 4px;">'
+    +   '<button class="btn btn-ghost btn-sm" style="margin-bottom:8px;" onclick="loadGradList()">\u{1F464} Load List</button>'
+    +   '<div id="grad-list" style="max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;margin-bottom:8px;"></div>'
+    +   '<div id="grad-sel-count" style="font-size:11px;color:var(--tx3);margin-bottom:8px;"></div>'
+    +   '<button class="btn btn-danger btn-sm" id="grad-btn" onclick="doGraduate()" style="display:none;">\u{1F393} Remove Selected</button>'
+    +   '<div id="grad-result" style="margin-top:8px;"></div>'
+    + '</div>';
+}
+
+// ROW Reward Accounts widget — search + accounts list + recent transactions.
+function renderARowWidget(){
+  var el = document.getElementById('aw-arow');
+  if (!el) return;
+  el.innerHTML = '<div style="padding:0 4px;">'
+    +   '<div class="row-admin-search" style="margin-bottom:8px;"><svg class="ui-ic row-admin-search-ico" viewBox="0 0 16 16"><use href="#i-search"/></svg>'
+    +     '<input class="finp" id="row-admin-search" placeholder="Search students..." oninput="filterRowAccounts()">'
+    +   '</div>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="loadRowAdminAccounts()">\u21bb Load Accounts</button>'
+    +   '<div class="row-admin-acct-list" id="row-admin-acct-list" style="max-height:200px;"></div>'
+    +   '<div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;">'
+    +     '<div style="font-size:11px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Recent Activity</div>'
+    +     '<div id="row-admin-tx-list" style="max-height:160px;overflow-y:auto;font-size:11px;color:var(--tx3);"></div>'
+    +     '<button class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="loadRowAdminTransactions()">\u21bb Load Transactions</button>'
+    +   '</div>'
+    + '</div>';
+}
+
+// School-Wide Reminders widget — title/body/datetime inputs + Send button.
+function renderARemWidget(){
+  var el = document.getElementById('aw-arem');
+  if (!el) return;
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);line-height:1.5;margin-bottom:8px;padding:0 4px;">Sends to <strong>every student and teacher</strong>.</div>'
+    + '<div style="padding:0 4px;">'
+    +   '<input class="finp" id="adm-rem-title" placeholder="\u2014Title *\u2014" style="margin-bottom:6px;" maxlength="100">'
+    +   '<textarea class="fta" id="adm-rem-body" placeholder="\u2014Details (optional)\u2014" style="min-height:48px;margin-bottom:6px;" maxlength="300"></textarea>'
+    +   '<input type="datetime-local" class="finp" id="adm-rem-when" style="margin-bottom:8px;width:100%;">'
+    +   '<button class="btn btn-primary btn-sm" onclick="doSendSchoolReminder()">\u{1F4E3} Send to School</button>'
+    +   '<div id="adm-rem-result" style="margin-top:8px;"></div>'
+    + '</div>';
+}
+
+// Data Cleanup widget — three age-threshold inputs + Run Cleanup button.
+function renderACleanWidget(){
+  var el = document.getElementById('aw-aclean');
+  if (!el) return;
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);line-height:1.5;margin-bottom:8px;padding:0 4px;">Active and pending tasks are never touched. Completed tasks move to ArchivedTasks.</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:0 4px;margin-bottom:10px;">'
+    +   '<div><label class="flbl" style="font-size:10px;">Archive completed older than</label>'
+    +     '<div style="display:flex;align-items:center;gap:4px;"><input class="finp" type="number" id="cl-completed" value="180" min="30" max="9999" style="width:70px;text-align:center;"><span style="font-size:11px;color:var(--tx3);">days</span></div></div>'
+    +   '<div><label class="flbl" style="font-size:10px;">Purge soft-deleted older than</label>'
+    +     '<div style="display:flex;align-items:center;gap:4px;"><input class="finp" type="number" id="cl-deleted" value="30" min="7" max="365" style="width:70px;text-align:center;"><span style="font-size:11px;color:var(--tx3);">days</span></div></div>'
+    +   '<div><label class="flbl" style="font-size:10px;">Remove old lunch older than</label>'
+    +     '<div style="display:flex;align-items:center;gap:4px;"><input class="finp" type="number" id="cl-lunch" value="60" min="14" max="365" style="width:70px;text-align:center;"><span style="font-size:11px;color:var(--tx3);">days</span></div></div>'
+    + '</div>'
+    + '<div style="padding:0 4px;"><button class="btn btn-primary btn-sm" id="cleanup-btn" onclick="doDataCleanup()">\u{1F9F9} Run Cleanup</button>'
+    +   '<div id="cleanup-result" style="margin-top:8px;"></div></div>';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. SCHOOL-WIDE REMINDERS
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Submit a school-wide reminder. Confirms first since it sends to everyone.
+// Empty datetime means "send now"; clears the form on success.
+function doSendSchoolReminder(){
+  var title = (document.getElementById('adm-rem-title') || {}).value || '';
+  var body  = (document.getElementById('adm-rem-body')  || {}).value || '';
+  var when  = (document.getElementById('adm-rem-when')  || {}).value || '';
+  var res   = document.getElementById('adm-rem-result');
+
+  if (!title.trim()){ toast('Title required', 'err'); return; }
+  if (!confirm('Send this reminder to every student and teacher?')) return;
+
+  var triggerISO = when ? new Date(when).toISOString() : '';
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){
+      if (res) res.innerHTML = '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#22c55e;">&#10003; School-wide reminder sent.</div>';
+      document.getElementById('adm-rem-title').value = '';
+      document.getElementById('adm-rem-body').value  = '';
+      document.getElementById('adm-rem-when').value  = '';
+    } else {
+      if (res) res.innerHTML = '<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#f87171;">&#10005; ' + esc((r && r.error) || 'Unknown error') + '</div>';
+    }
+  }).sendSchoolReminder(title.trim(), body.trim(), triggerISO);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. SPREADSHEET HEALTH STATS
+   Renders a usage bar (% of Google Sheets 10M-cell limit) plus a
+   per-sheet row-count grid. Sheets with >5000 rows get amber styling.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch and render the data stats overview.
+function loadAdminStats(){
+  var el = document.getElementById('stats-body');
+  if (el) el.innerHTML = '<div style="color:var(--tx4);">Loading...</div>';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (!el) return;
+      if (!r || !r.success){
+        el.innerHTML = '<div style="color:#f87171;">' + esc((r && r.error) || 'Stats unavailable') + '</div>';
+        return;
+      }
+
+      var stats = Array.isArray(r.stats) ? r.stats : [];
+      if (!stats.length){
+        el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:10px;text-align:center;">No stats available.</div>';
+        return;
+      }
+
+      // Total cells used + percentage of Sheets limit
+      var totalCells = stats.reduce(function(a, s){ return a + (s && s.cells ? s.cells : 0); }, 0);
+      var pct = Math.round(totalCells / 100000 * 100) / 100;
+      var barColor = pct < 50 ? '#22c55e' : pct < 80 ? '#f59e0b' : '#ef4444';
+
+      var html = '<div style="margin-bottom:10px;">'
+        + '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">'
+        +   '<span style="color:var(--tx3);">Total cells used</span>'
+        +   '<span style="color:var(--tx2);font-family:\'DM Mono\',monospace;">' + totalCells.toLocaleString() + ' / 10,000,000</span>'
+        + '</div>'
+        + '<div style="height:6px;background:rgba(255,255,255,.07);border-radius:99px;overflow:hidden;">'
+        +   '<div style="height:100%;width:' + Math.min(pct, 100) + '%;background:' + barColor + ';border-radius:99px;transition:width .4s;"></div>'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--tx4);margin-top:3px;">' + pct + '% of Google Sheets limit</div>'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">';
+
+      // Per-sheet cards
+      stats.forEach(function(s){
+        if (!s || !s.name) return;
+        var rows = s.rows || 0;
+        var warn = rows > 5000;
+        html += '<div style="background:rgba(255,255,255,.03);border:1px solid ' + (warn ? 'rgba(245,158,11,.3)' : 'var(--border)') + ';border-radius:8px;padding:8px 10px;">'
+          + '<div style="font-size:11px;font-weight:600;color:' + (warn ? '#fbbf24' : 'var(--tx2)') + ';">' + esc(s.name) + '</div>'
+          + '<div style="font-family:\'DM Mono\',monospace;font-size:13px;color:var(--tx);margin-top:2px;">' + rows.toLocaleString() + '</div>'
+          + '<div style="font-size:10px;color:var(--tx4);">rows</div>'
+          + '</div>';
+      });
+      html += '</div>';
+      el.innerHTML = html;
+    })
+    .withFailureHandler(function(e){
+      if (el) el.innerHTML = '<div style="color:#f87171;">' + esc(e && e.message ? e.message : 'Failed to load stats') + '</div>';
+    })
+    .getDataStats();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. LUNCH MENU IMPORT
+   Posts pasted PDF text to the server's importLunchData parser.
+   Server returns added/skipped/errors + the inferred target month.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Send the textarea contents to the server's lunch parser, then
+// surface the success/skip/warn breakdown to the user.
+function doLunchImport(){
+  var ta   = document.getElementById('lunch-import-ta');
+  var res  = document.getElementById('lunch-import-result');
+  var text = ta ? ta.value : '';
+
+  if (!text || !text.trim()){ toast('Paste some lunch data first', 'err'); return; }
+  if (res) res.innerHTML = '<div style="color:var(--tx3);font-size:12px;">Importing...</div>';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (!res) return;
+      if (!r.success){
+        res.innerHTML = '<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#f87171;">&#10005; ' + esc(r.error) + '</div>';
+        return;
+      }
+      var errHtml = r.errors && r.errors.length
+        ? '<div style="margin-top:8px;font-size:11px;color:#f59e0b;">Warnings:<br>' + r.errors.map(function(e){ return esc(e); }).join('<br>') + '</div>'
+        : '';
+      var monthLbl = r.targetMonth ? ' to <strong>' + esc(r.targetMonth) + '</strong>' : '';
+      res.innerHTML = '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#22c55e;">'
+        + '&#10003; Imported <strong>' + r.added + '</strong> day(s)' + monthLbl
+        + (r.skipped ? ' &mdash; <span style="color:var(--tx3);">' + r.skipped + ' already existed, skipped</span>' : '')
+        + '</div>' + errHtml;
+      // Clear the textarea on any successful import
+      if (r.added > 0 && ta) ta.value = '';
+      loadAdminStats();
+    })
+    .withFailureHandler(function(e){
+      if (res) res.innerHTML = '<div style="color:#f87171;">' + esc(e.message) + '</div>';
+    })
+    .importLunchData(text);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   8. REPAIR SHEETS
+   NOTE: This function is also defined in Index.html's secondary
+   <script> block. Per the refactor rule "don't dedupe in this pass,"
+   it's kept here verbatim. Last definition in the bundle wins.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Run the server-side repair routine that re-creates any missing tabs.
+function doRepairSheets(){
+  var btn = document.getElementById('repair-btn');
+  var res = document.getElementById('repair-result');
+  if (btn) btn.textContent = 'Running...';
+  if (res) res.innerHTML = '';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (btn) btn.textContent = '&#128295; Run Repair';
+      if (!res) return;
+      if (r.success){
+        res.innerHTML = r.created.length
+          ? '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:#22c55e;">&#10003; Created: <strong>' + r.created.join(', ') + '</strong><br><span style="color:var(--tx3);font-size:12px;">All existing data is untouched.</span></div>'
+          : '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:#22c55e;">&#10003; All sheets already present — nothing needed fixing.</div>';
+      } else {
+        res.innerHTML = '<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:#f87171;">&#10005; ' + esc(r.error || 'Unknown error') + '</div>';
+      }
+    })
+    .withFailureHandler(function(e){
+      if (btn) btn.textContent = '&#128295; Run Repair';
+      if (res) res.innerHTML = '<div style="color:#f87171;">' + esc(e.message || 'Script error') + '</div>';
+    })
+    .repairSheetsFromApp();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. DATA CLEANUP
+   Sends three age thresholds to the server, which archives completed
+   tasks, purges soft-deleted tasks, and removes old lunch entries.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Read the three age inputs, post to runDataCleanup, render the result.
+function doDataCleanup(){
+  var btn = document.getElementById('cleanup-btn');
+  var res = document.getElementById('cleanup-result');
+
+  // Defaults match the input element values (180/30/60)
+  var completed = parseInt((document.getElementById('cl-completed') || {}).value || 180);
+  var deleted   = parseInt((document.getElementById('cl-deleted')   || {}).value || 30);
+  var lunch     = parseInt((document.getElementById('cl-lunch')     || {}).value || 60);
+
+  if (btn) btn.textContent = 'Running...';
+  if (res) res.innerHTML = '';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (btn) btn.textContent = '&#129529; Run Cleanup';
+      if (!res) return;
+      if (!r.success){ res.innerHTML = '<div style="color:#f87171;">' + esc(r.error) + '</div>'; return; }
+
+      var t = r.results.tasks || {};
+      var l = r.results.lunch || {};
+      res.innerHTML = '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:12px 14px;font-size:13px;color:#22c55e;">'
+        + '&#10003; Cleanup complete<br>'
+        + '<span style="font-size:12px;color:var(--tx2);">'
+        +   'Tasks archived: ' + (t.archived || 0) + ' &bull; '
+        +   'Deleted tasks purged: ' + (t.deleted || 0) + ' &bull; '
+        +   'Old lunch entries removed: ' + (l.deleted || 0)
+        +   (t.error ? '<br><span style="color:#f59e0b;">Task warning: '  + esc(t.error) + '</span>' : '')
+        +   (l.error ? '<br><span style="color:#f59e0b;">Lunch warning: ' + esc(l.error) + '</span>' : '')
+        + '</span></div>';
+      loadAdminStats();
+    })
+    .withFailureHandler(function(e){
+      if (btn) btn.textContent = '&#129529; Run Cleanup';
+      if (res) res.innerHTML = '<div style="color:#f87171;">' + esc(e.message) + '</div>';
+    })
+    .runDataCleanup({completedDays:completed, deletedDays:deleted, lunchDays:lunch});
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   10. BELL SCHEDULES — list + load + delete + set default
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch all bell schedules, refresh both the local cache and the
+// global `bellSchedules` (used by the student schedule import).
+function loadBellSchedules(){
+  google.script.run.withSuccessHandler(function(list){
+    _bellSchedulesCache = list || [];
+    renderBellList();
+    bellSchedules = _bellSchedulesCache;
+  }).withFailureHandler(function(){
+    var el = document.getElementById('bell-list');
+    if (el) el.innerHTML = '<div style="color:#f87171;font-size:12px;">Could not load.</div>';
+  }).getAllBellSchedules();
+}
+
+// Render the bell schedules list. Each row shows name + period count +
+// default badge, with Edit / Set-Default / Delete buttons.
+function renderBellList(){
+  var el = document.getElementById('bell-list');
+  if (!el) return;
+
+  if (!_bellSchedulesCache.length){
+    el.innerHTML = '<div style="color:var(--tx4);font-size:12px;text-align:center;padding:18px;">No bell schedules yet. Click <strong>+ New Schedule</strong> to start.</div>';
+    return;
+  }
+
+  el.innerHTML = _bellSchedulesCache.map(function(b){
+    var pcount   = (b.periods || []).length;
+    var defBadge = b.isDefault
+      ? '<span style="font-size:9px;font-weight:700;background:rgba(34,197,94,.12);color:#22c55e;border:1px solid rgba(34,197,94,.3);border-radius:4px;padding:2px 7px;letter-spacing:.4px;text-transform:uppercase;">Default</span>'
+      : '';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:9px;border-left:3px solid ' + esc(b.color || '#6366f1') + ';">'
+      +   '<div style="flex:1;min-width:0;">'
+      +     '<div style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--tx);">' + esc(b.name) + defBadge + '</div>'
+      +     '<div style="font-size:11px;color:var(--tx4);">' + pcount + ' period' + (pcount !== 1 ? 's' : '') + '</div>'
+      +   '</div>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="openBellEditor(\'' + esc(b.id) + '\')">Edit</button>'
+      +   (b.isDefault ? '' : '<button class="btn btn-ghost btn-sm" onclick="setBellDefault(\'' + esc(b.id) + '\')" title="Make default">★</button>')
+      +   '<button class="btn btn-danger btn-sm" onclick="deleteBell(\'' + esc(b.id) + '\')">&#10005;</button>'
+      + '</div>';
+  }).join('');
+}
+
+// Mark a bell schedule as the default by re-saving it with isDefault=true.
+// Server clears the flag on all others.
+function setBellDefault(id){
+  var bell = null;
+  for (var i = 0; i < _bellSchedulesCache.length; i++){
+    if (_bellSchedulesCache[i].id === id) bell = _bellSchedulesCache[i];
+  }
+  if (!bell) return;
+  bell.isDefault = true;
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ toast('Set as default', 'ok'); loadBellSchedules(); }
+    else toast(r.error || 'Error', 'err');
+  }).saveBellSchedule(JSON.stringify(bell));
+}
+
+// Confirm + delete a bell schedule. Server also clears any calendar
+// dates that referenced it. Refreshes both the list and the calendar.
+function deleteBell(id){
+  var bell = null;
+  for (var i = 0; i < _bellSchedulesCache.length; i++){
+    if (_bellSchedulesCache[i].id === id) bell = _bellSchedulesCache[i];
+  }
+  if (!bell) return;
+  if (!confirm('Delete "' + bell.name + '"?\n\nAny calendar dates assigned to this schedule will be cleared.')) return;
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ toast('Deleted', 'inf'); loadBellSchedules(); renderSchedCalendar(); }
+    else toast(r.error || 'Error', 'err');
+  }).deleteBellSchedule(id);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   11. BELL SCHEDULES — editor modal
+   Full-screen modal for creating/editing a bell schedule. Period rows
+   have number/label/start/end inputs + a remove button.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the bell editor. Pass an id to edit an existing schedule, or no
+// args to create a new one (with an 8-period default template).
+function openBellEditor(id){
+  _editingBellId = id || null;
+  var bell = id ? _bellSchedulesCache.find(function(b){ return b.id === id; }) : null;
+
+  // Pull values from existing bell, or sensible defaults for a new one
+  var name      = bell ? bell.name : '';
+  var color     = bell ? (bell.color || '#6366f1') : '#6366f1';
+  var isDefault = bell ? bell.isDefault : false;
+  var periods   = bell ? (bell.periods || []) : [
+    {period:1, name:'Period 1', startTime:'08:00', endTime:'08:50'},
+    {period:2, name:'Period 2', startTime:'08:55', endTime:'09:45'},
+    {period:3, name:'Period 3', startTime:'09:50', endTime:'10:40'},
+    {period:4, name:'Period 4', startTime:'10:45', endTime:'11:35'},
+    {period:5, name:'Lunch',    startTime:'11:35', endTime:'12:15'},
+    {period:6, name:'Period 5', startTime:'12:20', endTime:'13:10'},
+    {period:7, name:'Period 6', startTime:'13:15', endTime:'14:05'},
+    {period:8, name:'Period 7', startTime:'14:10', endTime:'15:00'}
+  ];
+
+  // Tear down any prior instance of the editor
+  var existing = document.getElementById('bell-edit-ov');
+  if (existing) existing.remove();
+
+  var ov = document.createElement('div');
+  ov.id = 'bell-edit-ov';
+  ov.className = 'overlay open';
+
+  var rowsHtml = periods.map(function(p, i){ return bellPeriodRowHtml(i, p); }).join('');
+  ov.innerHTML = '<div class="mbox wide" style="max-width:640px;">'
+    + '<div class="mtitle">' + (id ? 'Edit' : 'New') + ' Bell Schedule</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 100px 110px;gap:10px;margin-bottom:14px;">'
+    +   '<div><label class="flbl">Name *</label><input class="finp" id="be-name" value="' + esc(name) + '" placeholder="e.g. Normal Schedule"></div>'
+    +   '<div><label class="flbl">Color</label><input type="color" id="be-color" value="' + esc(color) + '" style="width:100%;height:36px;border:1px solid var(--border);border-radius:8px;background:none;cursor:pointer;padding:3px;"></div>'
+    +   '<div><label class="flbl">Default</label><label style="display:flex;align-items:center;gap:6px;height:36px;font-size:12px;color:var(--tx2);cursor:pointer;"><input type="checkbox" id="be-default" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--a1);width:16px;height:16px;">Use by default</label></div>'
+    + '</div>'
+    + '<div style="font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--tx3);margin-bottom:6px;">Periods</div>'
+    + '<div id="be-periods" style="max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:5px;">' + rowsHtml + '</div>'
+    + '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" onclick="addBellPeriodRow()">+ Add Period</button>'
+    + '<div class="mfooter">'
+    +   '<button class="btn btn-ghost" onclick="document.getElementById(\'bell-edit-ov\').remove()">Cancel</button>'
+    +   '<button class="btn btn-primary" onclick="saveBellEditor()">Save Schedule</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(ov);
+}
+
+// Build a single period row's HTML — used by both initial render and
+// addBellPeriodRow. data-bep attributes let saveBellEditor read values back.
+function bellPeriodRowHtml(i, p){
+  return '<div class="be-period-row" style="display:grid;grid-template-columns:60px 1fr 100px 100px 30px;gap:6px;align-items:center;">'
+    + '<input class="finp" type="number" min="0" max="20" value="' + esc(String(p.period || (i + 1))) + '" data-bep="period" placeholder="#" style="text-align:center;font-size:12px;">'
+    + '<input class="finp" value="' + esc(p.name || '') + '" data-bep="name" placeholder="Label (e.g. Period 1, Lunch)" style="font-size:12px;">'
+    + '<input class="finp" type="time" value="' + esc(p.startTime || '') + '" data-bep="startTime" style="font-size:12px;">'
+    + '<input class="finp" type="time" value="' + esc(p.endTime   || '') + '" data-bep="endTime" style="font-size:12px;">'
+    + '<button class="btn btn-danger btn-sm" onclick="this.closest(\'.be-period-row\').remove()" style="padding:4px 8px;">&#10005;</button>'
+    + '</div>';
+}
+
+// Append a fresh empty period row to the end of the editor's periods list.
+function addBellPeriodRow(){
+  var box = document.getElementById('be-periods');
+  if (!box) return;
+  var i = box.querySelectorAll('.be-period-row').length;
+  var div = document.createElement('div');
+  div.innerHTML = bellPeriodRowHtml(i, {period:i + 1, name:'', startTime:'', endTime:''});
+  box.appendChild(div.firstChild);
+}
+
+// Collect the editor's values, validate, and save to the server.
+// Skips empty period rows entirely. Refreshes both list and calendar on success.
+function saveBellEditor(){
+  var name = (document.getElementById('be-name').value || '').trim();
+  if (!name){ toast('Name is required', 'err'); return; }
+
+  var color     = document.getElementById('be-color').value;
+  var isDefault = document.getElementById('be-default').checked;
+
+  // Walk every row's inputs (data-bep="...") and assemble period objects
+  var rows = document.querySelectorAll('#be-periods .be-period-row');
+  var periods = [];
+  rows.forEach(function(r){
+    var p = {};
+    r.querySelectorAll('input[data-bep]').forEach(function(inp){
+      var k = inp.dataset.bep;
+      if (k === 'period') p.period = parseInt(inp.value) || 0;
+      else                p[k]     = inp.value || '';
+    });
+    // Skip totally empty rows
+    if (p.name || p.startTime || p.endTime) periods.push(p);
+  });
+  if (!periods.length){ toast('Add at least one period', 'err'); return; }
+
+  var payload = {
+    id:        _editingBellId,
+    name:      name,
+    color:     color,
+    isDefault: isDefault,
+    periods:   periods
+  };
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      document.getElementById('bell-edit-ov').remove();
+      toast('Saved', 'ok');
+      loadBellSchedules();
+      renderSchedCalendar();
+    } else toast(r.error || 'Error', 'err');
+  }).saveBellSchedule(JSON.stringify(payload));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   12. SCHEDULE CALENDAR — month grid + navigation
+   Mini calendar showing which bell schedule applies on which date.
+   Each cell is clickable to open the per-date entry modal.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the calendar header + empty grid, then load the current month's
+// entries from the server and populate the grid.
+function renderSchedCalendar(){
+  var area = document.getElementById('sched-cal-area');
+  if (!area) return;
+
+  // Default to current month on first render
+  if (!_schedCalDate) _schedCalDate = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  var year  = _schedCalDate.getFullYear();
+  var month = _schedCalDate.getMonth();
+  var first = new Date(year, month, 1);
+  var last  = new Date(year, month + 1, 0);
+  var startStr = Utilities_format(first);
+  var endStr   = Utilities_format(last);
+
+  area.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+    +   '<button class="btn btn-ghost btn-sm" onclick="schedCalNav(-1)">&laquo; Prev</button>'
+    +   '<div style="font-size:14px;font-weight:600;">' + MONTHS[month] + ' ' + year + '</div>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="schedCalNav(1)">Next &raquo;</button>'
+    + '</div>'
+    + '<div id="sched-cal-grid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;font-size:11px;"><div style="color:var(--tx4);text-align:center;padding:14px;">Loading...</div></div>';
+
+  google.script.run.withSuccessHandler(function(entries){
+    drawSchedCalendarGrid(year, month, entries || []);
+  }).withFailureHandler(function(){
+    drawSchedCalendarGrid(year, month, []);
+  }).getScheduleCalendar(startStr, endStr);
+}
+
+// Move the calendar by ±N months and re-render.
+function schedCalNav(dir){
+  if (!_schedCalDate) _schedCalDate = new Date();
+  _schedCalDate = new Date(_schedCalDate.getFullYear(), _schedCalDate.getMonth() + dir, 1);
+  renderSchedCalendar();
+}
+
+// Paint the day cells inside #sched-cal-grid based on the entries[] list.
+// Each day shows its number, the bell schedule's tinted background, and an
+// optional A/B day-type marker in the upper right.
+function drawSchedCalendarGrid(year, month, entries){
+  var grid = document.getElementById('sched-cal-grid');
+  if (!grid) return;
+
+  // Index entries by date for quick lookup
+  var entryMap = {};
+  entries.forEach(function(e){ entryMap[e.date] = e; });
+  // Index bell schedules by id
+  var bellMap = {};
+  _bellSchedulesCache.forEach(function(b){ bellMap[b.id] = b; });
+
+  var first     = new Date(year, month, 1);
+  var last      = new Date(year, month + 1, 0);
+  var startDow  = first.getDay();
+  var totalDays = last.getDate();
+  var todayKey  = Utilities_format(new Date());
+
+  // Day-of-week header row
+  var DAYS_SHORT = ['S','M','T','W','T','F','S'];
+  var html = DAYS_SHORT.map(function(d){
+    return '<div style="font-weight:700;color:var(--tx3);text-align:center;padding:5px 0;font-size:10px;letter-spacing:.5px;">' + d + '</div>';
+  }).join('');
+
+  // Empty cells for days before the 1st of the month
+  for (var i = 0; i < startDow; i++) html += '<div></div>';
+
+  // Day cells
+  for (var d = 1; d <= totalDays; d++){
+    var dt    = new Date(year, month, d);
+    var key   = Utilities_format(dt);
+    var entry = entryMap[key];
+    var bell  = entry ? bellMap[entry.bellScheduleId] : null;
+
+    // Build the cell's tinted look from the bell schedule color
+    var bgRgba = bell ? bell.color + '22' : 'rgba(255,255,255,.02)';
+    var border = bell ? bell.color : 'var(--border)';
+    var dayLabel  = (entry && entry.dayType)
+      ? '<div style="position:absolute;top:2px;right:3px;font-size:8px;font-weight:700;color:' + (bell ? bell.color : 'var(--a2)') + ';">' + esc(entry.dayType) + '</div>'
+      : '';
+    var bellLabel = bell
+      ? '<div style="font-size:8px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;">' + esc(bell.name) + '</div>'
+      : '';
+    var todayMark = key === todayKey ? 'box-shadow:inset 0 0 0 2px var(--a1);' : '';
+
+    html += '<div onclick="openSchedCalEntry(\'' + key + '\')" style="position:relative;background:' + bgRgba + ';border:1px solid ' + border + ';border-radius:6px;padding:5px 6px;min-height:42px;cursor:pointer;transition:transform .1s;' + todayMark + '" onmouseover="this.style.transform=\'scale(1.04)\'" onmouseout="this.style.transform=\'\'">'
+      + dayLabel
+      + '<div style="font-weight:700;font-size:11px;color:var(--tx);">' + d + '</div>'
+      + bellLabel
+      + '</div>';
+  }
+  grid.innerHTML = html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   13. SCHEDULE CALENDAR — per-date entry modal
+   Click a day cell → modal with Bell Schedule dropdown, A/B Day
+   selector, optional notes, and Save/Clear/Cancel buttons.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the entry modal for a single date. Fetches that date's existing
+// entry first (if any) so the modal can pre-fill the dropdowns.
+function openSchedCalEntry(dateStr){
+  google.script.run.withSuccessHandler(function(entries){
+    var entry = entries.length ? entries[0] : null;
+
+    // Tear down any prior instance
+    var existing = document.getElementById('sce-ov');
+    if (existing) existing.remove();
+
+    var ov = document.createElement('div');
+    ov.className = 'overlay open';
+    ov.id = 'sce-ov';
+
+    // Bell schedule dropdown options (with default selected if matched)
+    var bellOpts = '<option value="">— Use Default —</option>' + _bellSchedulesCache.map(function(b){
+      return '<option value="' + esc(b.id) + '"' + (entry && entry.bellScheduleId === b.id ? ' selected' : '') + '>'
+        + esc(b.name) + (b.isDefault ? ' (default)' : '') + '</option>';
+    }).join('');
+
+    // Pretty date heading: "Wednesday, May 5, 2026"
+    var dt         = new Date(dateStr + 'T12:00:00');
+    var prettyDate = DAYS[dt.getDay()] + ', ' + MONTHS[dt.getMonth()] + ' ' + dt.getDate() + ', ' + dt.getFullYear();
+    var dayType    = entry ? entry.dayType || '' : '';
+
+    // Day-type button helper (None/A/B)
+    function dtBtn(val, lbl){
+      var s = dayType === val ? 'background:var(--a3);border-color:var(--a1);color:var(--a2);' : '';
+      return '<div onclick="pickSchedDayType(\'' + val + '\')" data-dt="' + val + '" style="flex:1;padding:8px 4px;border:1px solid var(--border);border-radius:7px;text-align:center;font-size:12px;font-weight:600;cursor:pointer;' + s + '">' + lbl + '</div>';
+    }
+
+    ov.innerHTML = '<div class="mbox" style="max-width:420px;">'
+      + '<div class="mtitle">' + esc(prettyDate) + '</div>'
+      + '<div class="fg"><label class="flbl">Bell Schedule</label><select class="fsel" id="sce-bell">' + bellOpts + '</select></div>'
+      + '<div class="fg"><label class="flbl">Day Type (for A/B rotation)</label><div style="display:flex;gap:6px;">'
+      +   '<div onclick="pickSchedDayType(\'\')" data-dt="" style="flex:1;padding:8px 4px;border:1px solid var(--border);border-radius:7px;text-align:center;font-size:12px;font-weight:600;cursor:pointer;' + (dayType === '' ? 'background:var(--a3);border-color:var(--a1);color:var(--a2);' : '') + '">None</div>'
+      +   dtBtn('A', 'A Day')
+      +   dtBtn('B', 'B Day')
+      + '</div><input type="hidden" id="sce-daytype" value="' + esc(dayType) + '"></div>'
+      + '<div class="fg"><label class="flbl">Notes (optional)</label><input class="finp" id="sce-notes" value="' + esc(entry ? entry.notes || '' : '') + '" placeholder="—e.g. Pep rally, Assembly—"></div>'
+      + '<div class="mfooter">'
+      +   '<button class="btn btn-ghost" onclick="document.getElementById(\'sce-ov\').remove()">Cancel</button>'
+      +   (entry ? '<button class="btn btn-danger btn-sm" onclick="clearSchedCalEntry(\'' + dateStr + '\')">Clear</button>' : '')
+      +   '<button class="btn btn-primary" onclick="saveSchedCalEntry(\'' + dateStr + '\')">Save</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+  }).getScheduleCalendar(dateStr, dateStr);
+}
+
+// Visually mark the picked day-type button and update the hidden input.
+// Iterates all [data-dt] elements globally (the modal uses unique data-dt values).
+function pickSchedDayType(val){
+  document.querySelectorAll('[data-dt]').forEach(function(el){
+    if (el.dataset.dt === val){
+      // Tack the active styles onto the existing inline style string
+      el.style.cssText = el.style.cssText + ';background:var(--a3);border-color:var(--a1);color:var(--a2);';
+    } else {
+      el.style.background   = '';
+      el.style.borderColor  = 'var(--border)';
+      el.style.color        = '';
+    }
+  });
+  var inp = document.getElementById('sce-daytype');
+  if (inp) inp.value = val;
+}
+
+// Save the entry's bell/dayType/notes to the server, close modal, refresh.
+function saveSchedCalEntry(dateStr){
+  var bell    = document.getElementById('sce-bell').value;
+  var dayType = document.getElementById('sce-daytype').value;
+  var notes   = document.getElementById('sce-notes').value;
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      document.getElementById('sce-ov').remove();
+      toast('Saved', 'ok');
+      renderSchedCalendar();
+    } else toast(r.error || 'Error', 'err');
+  }).setScheduleCalendarEntry(dateStr, bell, dayType, notes);
+}
+
+// Clear an entry by saving an empty bell/dayType/notes (server interprets
+// all-empty as "delete this date's entry").
+function clearSchedCalEntry(dateStr){
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      document.getElementById('sce-ov').remove();
+      toast('Cleared', 'inf');
+      renderSchedCalendar();
+    }
+  }).setScheduleCalendarEntry(dateStr, '', '', '');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   14. SCHEDULE CALENDAR — bulk-assign modal
+   Apply a bell schedule to a date range, optionally filtered by
+   day-of-week. Useful for "set every Wednesday this semester to Early Out".
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the bulk-assign modal. Pre-checks Mon–Fri.
+function openBulkBellAssign(){
+  var existing = document.getElementById('bba-ov');
+  if (existing) existing.remove();
+
+  var bellOpts = '<option value="">— Clear (use default) —</option>' + _bellSchedulesCache.map(function(b){
+    return '<option value="' + esc(b.id) + '">' + esc(b.name) + (b.isDefault ? ' (default)' : '') + '</option>';
+  }).join('');
+
+  var ov = document.createElement('div');
+  ov.className = 'overlay open';
+  ov.id = 'bba-ov';
+
+  // Day-of-week checkboxes — Sun(0)–Sat(6); Mon–Fri pre-checked
+  var DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var dowChecks = DOW.map(function(d, i){
+    return '<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;"><input type="checkbox" class="bba-dow" data-d="' + i + '" ' + (i >= 1 && i <= 5 ? 'checked' : '') + ' style="accent-color:var(--a1);">' + d + '</label>';
+  }).join('');
+
+  ov.innerHTML = '<div class="mbox" style="max-width:480px;">'
+    + '<div class="mtitle">Bulk Assign Bell Schedule</div>'
+    + '<p style="font-size:13px;color:var(--tx3);line-height:1.6;margin-bottom:12px;">Apply a bell schedule to a range of dates. Useful for setting a default for the whole semester, or marking every Wednesday as Early Out.</p>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">'
+    +   '<div><label class="flbl">Start Date</label><input type="date" class="finp" id="bba-start"></div>'
+    +   '<div><label class="flbl">End Date</label><input type="date" class="finp" id="bba-end"></div>'
+    + '</div>'
+    + '<div class="fg"><label class="flbl">Bell Schedule</label><select class="fsel" id="bba-bell">' + bellOpts + '</select></div>'
+    + '<div class="fg"><label class="flbl">Day Type</label><select class="fsel" id="bba-daytype"><option value="">None</option><option value="A">A Day</option><option value="B">B Day</option></select></div>'
+    + '<div class="fg"><label class="flbl">Days of Week to Include</label><div style="display:flex;gap:10px;flex-wrap:wrap;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;">' + dowChecks + '</div></div>'
+    + '<div class="fg"><label class="flbl">Notes (optional)</label><input class="finp" id="bba-notes" placeholder="—e.g. Wednesday Early Out—"></div>'
+    + '<div class="mfooter">'
+    +   '<button class="btn btn-ghost" onclick="document.getElementById(\'bba-ov\').remove()">Cancel</button>'
+    +   '<button class="btn btn-primary" onclick="doBulkBellAssign()">Apply to Range</button>'
+    + '</div></div>';
+  document.body.appendChild(ov);
+}
+
+// Validate inputs, collect checked DOWs as an int array, post to server.
+// Server returns count of dates assigned.
+function doBulkBellAssign(){
+  var s = document.getElementById('bba-start').value;
+  var e = document.getElementById('bba-end').value;
+  if (!s || !e){ toast('Pick a date range', 'err'); return; }
+
+  var bell    = document.getElementById('bba-bell').value;
+  var dayType = document.getElementById('bba-daytype').value;
+  var notes   = document.getElementById('bba-notes').value;
+  var dows    = Array.from(document.querySelectorAll('.bba-dow:checked')).map(function(cb){ return parseInt(cb.dataset.d); });
+  if (!dows.length){ toast('Pick at least one day of week', 'err'); return; }
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      document.getElementById('bba-ov').remove();
+      toast('Applied to ' + r.count + ' day(s)', 'ok');
+      renderSchedCalendar();
+    } else toast(r.error || 'Error', 'err');
+  }).setScheduleCalendarRange(s, e, bell, dayType, notes, JSON.stringify(dows));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   15. GRADUATE STUDENTS
+   Permanently removes selected students and all their data. Run
+   annually after 8th-graders leave. Cannot be undone.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Load the full student roster into a checkbox list inside the widget.
+function loadGradList(){
+  var el  = document.getElementById('grad-list');
+  var cnt = document.getElementById('grad-sel-count');
+  if (el) el.innerHTML = '<div style="color:var(--tx3);font-size:12px;">Loading...</div>';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      _gradStudents = r.students || [];
+      if (!el) return;
+      if (!_gradStudents.length){ el.innerHTML = '<div style="color:var(--tx4);font-size:13px;">No students registered yet.</div>'; return; }
+
+      // Render alphabetically — the teacher visually identifies 8th graders
+      el.innerHTML = _gradStudents.map(function(s, i){
+        return '<label style="display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);cursor:pointer;">'
+          + '<input type="checkbox" data-i="' + i + '" onchange="updateGradCount()" style="width:15px;height:15px;accent-color:var(--a1);">'
+          + '<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--a1),#a855f7);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:white;flex-shrink:0;">' + esc(s.name.charAt(0)) + '</div>'
+          + '<div style="flex:1;min-width:0;">'
+          +   '<div style="font-size:13px;font-weight:600;">' + esc(s.name) + '</div>'
+          +   '<div style="font-size:11px;color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(s.email) + '</div>'
+          + '</div>'
+          + '</label>';
+      }).join('');
+      updateGradCount();
+    })
+    .withFailureHandler(function(e){
+      if (el) el.innerHTML = '<div style="color:#f87171;">' + esc(e.message) + '</div>';
+    })
+    .getStuGroupData();
+}
+
+// Update the "X students selected" count and toggle the Remove button.
+function updateGradCount(){
+  var checked = document.querySelectorAll('#grad-list input[type=checkbox]:checked');
+  var cnt     = document.getElementById('grad-sel-count');
+  var btn     = document.getElementById('grad-btn');
+  if (cnt) cnt.textContent = checked.length + ' student' + (checked.length !== 1 ? 's' : '') + ' selected';
+  if (btn) btn.style.display = checked.length ? 'inline-flex' : 'none';
+}
+
+// Confirm + permanently remove the selected students. Server purges
+// all their data (tasks, prefs, etc.). Cannot be undone.
+function doGraduate(){
+  var checked = Array.from(document.querySelectorAll('#grad-list input[type=checkbox]:checked'));
+  if (!checked.length){ toast('Select at least one student', 'err'); return; }
+
+  // Resolve checked indices back to email/name pairs for the confirm prompt
+  var selectedEmails = checked.map(function(cb){
+    var i = parseInt(cb.dataset.i);
+    return _gradStudents[i] ? _gradStudents[i].email : '';
+  }).filter(Boolean);
+  var names = checked.map(function(cb){
+    var i = parseInt(cb.dataset.i);
+    return _gradStudents[i] ? _gradStudents[i].name : '';
+  }).filter(Boolean);
+
+  if (!confirm('Permanently remove ' + selectedEmails.length + ' student(s)?\n\n' + names.join(', ') + '\n\nThis cannot be undone.')) return;
+
+  var btn = document.getElementById('grad-btn');
+  var res = document.getElementById('grad-result');
+  if (btn) btn.textContent = 'Removing...';
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (btn){ btn.textContent = '&#127891; Remove Selected Students'; btn.style.display = 'none'; }
+      if (!res) return;
+      if (!r.success){ res.innerHTML = '<div style="color:#f87171;">' + esc(r.error) + '</div>'; return; }
+
+      res.innerHTML = '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:12px 14px;font-size:13px;color:#22c55e;">'
+        + '&#10003; Removed <strong>' + r.removed.students + '</strong> student(s) and all their data. '
+        + '<span style="color:var(--tx3);">(' + r.removed.tasks + ' tasks purged)</span>'
+        + '</div>';
+
+      // Clean up the widget's UI state and force a stats refresh
+      var gl = document.getElementById('grad-list');
+      if (gl) gl.innerHTML = '';
+      var sc = document.getElementById('grad-sel-count');
+      if (sc) sc.textContent = '';
+      // Force re-fetch on next teacher-tab navigation
+      students = []; groups = [];
+      loadAdminStats();
+    })
+    .withFailureHandler(function(e){
+      if (btn) btn.textContent = '&#127891; Remove Selected Students';
+      if (res) res.innerHTML = '<div style="color:#f87171;">' + esc(e.message) + '</div>';
+    })
+    .graduateStudents(JSON.stringify(selectedEmails));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   16. ROW REWARDS ADMIN — accounts (load, render, search, adjust)
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch all ROW accounts from the server, cache them, render the list.
+function loadRowAdminAccounts(){
+  var listEl = document.getElementById('row-admin-acct-list');
+  if (listEl) listEl.innerHTML = '<div style="color:var(--tx3);font-size:12px;padding:10px;">Loading...</div>';
+
+  google.script.run.withSuccessHandler(function(r){
+    if (!r.success){
+      if (listEl) listEl.innerHTML = '<div style="color:#f87171;font-size:12px;">' + esc(r.error || 'Error') + '</div>';
+      return;
+    }
+    _rowAdminAccounts = r.accounts || [];
+    renderRowAdminAccounts(_rowAdminAccounts);
+  }).adminGetAllRowAccounts();
+}
+
+// Render the accounts list, splitting students from staff with a divider.
+// Each row has +1 / ± / -1 quick-action buttons.
+function renderRowAdminAccounts(list){
+  var listEl = document.getElementById('row-admin-acct-list');
+  if (!listEl) return;
+  if (!list.length){
+    listEl.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:10px;text-align:center;">No matching accounts.</div>';
+    return;
+  }
+
+  // Split by role for grouped display
+  var students = list.filter(function(a){ return a.role !== 'teacher'; });
+  var teachers = list.filter(function(a){ return a.role === 'teacher'; });
+
+  // Per-account row builder
+  function renderItem(a){
+    var roleBadge = a.role === 'teacher'
+      ? '<span class="row-admin-role teacher">Teacher</span>'
+      : '<span class="row-admin-role student">Student</span>';
+    return '<div class="row-admin-acct"><div class="row-admin-acct-name">' + esc(a.name) + roleBadge
+      + '<div style="font-size:10px;color:var(--tx4);font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(a.email) + '</div></div>'
+      + '<div class="row-admin-acct-bal">' + a.balance + '</div>'
+      + '<div class="row-admin-acct-actions">'
+      +   '<button class="btn btn-primary btn-sm" onclick="adjustRowBalance(\'' + esc(a.email) + '\',1)">+1</button>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="promptAdjustRow(\'' + esc(a.email) + '\',\'' + esc(a.name) + '\')">&plusmn;</button>'
+      +   '<button class="btn btn-danger btn-sm" onclick="adjustRowBalance(\'' + esc(a.email) + '\',-1)">&minus;1</button>'
+      + '</div></div>';
+  }
+
+  var html = '';
+  if (students.length){
+    html += '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin:6px 2px 4px;">Students (' + students.length + ')</div>';
+    html += students.map(renderItem).join('');
+  }
+  if (teachers.length){
+    html += '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin:10px 2px 4px;padding-top:8px;border-top:1px solid var(--border);">Staff (' + teachers.length + ')</div>';
+    html += teachers.map(renderItem).join('');
+  }
+  listEl.innerHTML = html;
+}
+
+// Filter cached accounts by name/email substring; re-render the list.
+// Empty query → render the full list back.
+function filterRowAccounts(){
+  var q = (document.getElementById('row-admin-search') || {}).value || '';
+  q = q.trim().toLowerCase();
+  if (!q){ renderRowAdminAccounts(_rowAdminAccounts); return; }
+  renderRowAdminAccounts(_rowAdminAccounts.filter(function(a){
+    return a.name.toLowerCase().indexOf(q) > -1 || a.email.toLowerCase().indexOf(q) > -1;
+  }));
+}
+
+// Quick +1/-1 adjustment via the row buttons.
+function adjustRowBalance(email, delta){
+  var reason = delta > 0 ? 'Quick add' : 'Quick deduct';
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast((delta > 0 ? '+' : '') + delta + ' ROW. New balance: ' + r.newBalance, 'ok');
+      // Update the cached balance in place so re-render shows new value
+      _rowAdminAccounts.forEach(function(a){ if (a.email === email) a.balance = r.newBalance; });
+      filterRowAccounts();
+    } else toast(r.error || 'Error', 'err');
+  }).adminAdjustRowBalance(email, delta, reason);
+}
+
+// Prompt for an arbitrary +/- adjustment with optional reason.
+function promptAdjustRow(email, name){
+  var amt = prompt('Adjust ROWs for ' + name + ':\n\nUse + to add, - to deduct.\nExample: 5 or -3');
+  if (amt === null) return;
+  var n = parseInt(String(amt).trim(), 10);
+  if (isNaN(n) || n === 0){ toast('Enter a non-zero number', 'err'); return; }
+
+  var reason = prompt('Reason (optional):') || '';
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast((n > 0 ? '+' : '') + n + ' ROW. New balance: ' + r.newBalance, 'ok');
+      _rowAdminAccounts.forEach(function(a){ if (a.email === email) a.balance = r.newBalance; });
+      filterRowAccounts();
+    } else toast(r.error || 'Error', 'err');
+  }).adminAdjustRowBalance(email, n, reason);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   17. ROW REWARDS ADMIN — recent transactions
+   Lazy-loaded list of the most recent ROW transactions across the
+   whole school. Capped at 50 by adminGetAllRowTransactions.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch and render the last 50 ROW transactions. Each row is color-coded
+// by status (pending=amber / denied=gray / spend=red / approved=green).
+function loadRowAdminTransactions(){
+  var el = document.getElementById('row-admin-tx-list');
+  if (el) el.innerHTML = '<div style="color:var(--tx4);">Loading...</div>';
+
+  google.script.run.withSuccessHandler(function(r){
+    if (!el) return;
+    if (!r.success){ el.innerHTML = '<div style="color:#f87171;">' + esc(r.error || 'Error') + '</div>'; return; }
+    if (!r.transactions.length){ el.innerHTML = '<div style="color:var(--tx4);text-align:center;padding:10px;">No transactions yet.</div>'; return; }
+
+    el.innerHTML = r.transactions.map(function(t){
+      // Resolve the amount string + color based on type/status
+      var amtStr, color;
+      if (t.status === 'pending'){ amtStr = '?'; color = '#fbbf24'; }
+      else if (t.status === 'denied'){ amtStr = '&mdash;'; color = 'var(--tx4)'; }
+      else if (t.type === 'spend' || t.type === 'admin_debit'){ amtStr = '&minus;' + t.amount; color = '#ef4444'; }
+      else { amtStr = '+' + t.amount; color = '#22c55e'; }
+
+      var when = t.createdAt ? fmtDate(t.createdAt.slice(0, 10)) : '';
+      return '<div style="display:flex;align-items:center;gap:7px;padding:5px 7px;border-bottom:1px solid var(--border);">'
+        + '<div style="flex:1;min-width:0;">'
+        +   '<div style="color:var(--tx2);font-weight:600;">' + esc(t.studentName) + ' <span style="color:var(--tx4);font-weight:400;">&middot; ' + esc(t.category) + '</span></div>'
+        +   '<div style="color:var(--tx4);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(t.description) + (when ? ' &middot; ' + when : '') + (t.teacherName ? ' &middot; ' + esc(t.teacherName) : '') + '</div>'
+        + '</div>'
+        + '<span style="color:' + color + ';font-family:DM Mono,monospace;font-weight:700;">' + amtStr + '</span>'
+        + '</div>';
+    }).join('');
+  }).adminGetAllRowTransactions(50);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   18. HELPERS
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Format a Date as YYYY-MM-DD. Named after the server's Utilities.formatDate
+// so the intent is clear at the call site. Used by the schedule calendar.
+function Utilities_format(d){
+  var y  = d.getFullYear();
+  var m  = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
+</script>

@@ -1,0 +1,577 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_settings.html — SETTINGS MODAL + GLOBAL PREFS APPLICATION
+   ║  ───────────────────────────────────────────────────────────────
+   ║  Owns the Settings modal (.smx) — its tabs, all the pickers inside
+   ║  it, and the functions that apply user prefs to the live page (UI
+   ║  style, background, text color/brightness, flip animation, etc.).
+   ║
+   ║  Also owns the prefs save/reset flow and a few flip-back helpers
+   ║  that don't fit elsewhere (custom schedule columns).
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. PREFS MERGE + GLOBAL APPLY (mergePrefs, applyAllPrefs)
+   ║   2. UI STYLE (8 themes — apply + picker)
+   ║   3. THEME (legacy stub — see notes)
+   ║   4. SETTINGS MODAL (open, save, reset, tab switching)
+   ║   5. BACKGROUND CONTROLS (presets, color, image, fit, target, overlay)
+   ║   6. TEXT CONTROLS (color mode, custom color, brightness, widget borders)
+   ║   7. FLIP ANIMATION STYLE
+   ║   8. PER-WIDGET STYLE PICKERS (clock + timer, both global and from-widget)
+   ║   9. CALENDAR MODE PICKER
+   ║  10. SCHEDULE CUSTOM COLUMNS (add + delete)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. PREFS MERGE + GLOBAL APPLY
+   mergePrefs combines user-saved prefs with defaults so missing keys
+   don't crash the UI. applyAllPrefs is called on boot and after reset
+   to push every pref to the live page in the right order.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Merge user-saved prefs with DEF_PREFS so missing keys fall back cleanly.
+function mergePrefs(p){
+  return Object.assign({}, DEF_PREFS, p);
+}
+
+// Apply every pref to the page. Called once on boot and again after
+// resetAllSettings. Order matters: theme → bg → text → flip → uiStyle.
+function applyAllPrefs(){
+  if (!prefs) return;
+  applyTheme(prefs.theme);
+  applyBackground();
+  applyTextBrightness(prefs.textBrightness || 100);
+  applyTextColor(prefs.textColorMode || 'light', prefs.textColorCustom || '');
+  applyWidgetBorder(prefs.widgetBorderColor || '');
+  document.body.dataset.flip = prefs.flipStyle || '3d';
+  applyUiStyle(prefs.uiStyle || 'glass');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. UI STYLE
+   Sets body[data-ui-style="<name>"] which CSS keys off to swap the
+   entire visual theme. Eight options live in index_styles.html:
+   zen, zen-dark, sporty, glass, notebook, notebook-dark,
+   sunrise, sunrise-dark.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Apply a UI style by setting the body's data-ui-style attribute.
+function applyUiStyle(s){
+  document.body.dataset.uiStyle = s || 'glass';
+}
+
+// Pick a UI style — saves to prefs, re-paints background, updates the
+// picker grid's selected card, and persists to the server.
+function pickUiStyle(s){
+  prefs.uiStyle = s;
+  applyBackground();
+  applyUiStyle(s);
+  document.querySelectorAll('.ui-style-opt').forEach(function(el){
+    el.classList.toggle('sel', el.dataset.us === s);
+  });
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. THEME (legacy stub — see notes at top of file)
+   Both functions appear to be vestigial leftovers from the deleted
+   accent-color theme system. Preserved intact but likely dead code.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Strip any theme-* class from body. Parameter is ignored.
+function applyTheme(t){
+  document.body.className = document.body.className.replace(/theme-\S+/g, '').trim();
+}
+
+// Set prefs.theme. Has no UI side effects and doesn't persist to server.
+function pickTheme(t){
+  prefs.theme = t;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. SETTINGS MODAL
+   openSettings primes every input in the modal to reflect current prefs,
+   then opens it. switchSmxTab toggles between Appearance / Background /
+   Text / Preferences panes. Save/Reset wire up the footer buttons.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the Settings modal. Pre-populates all controls (radios, sliders,
+// color pickers) so they reflect the user's current prefs.
+function openSettings(){
+  // Sync each picker group's "sel" highlight to the matching pref value
+  document.querySelectorAll('.ui-style-opt').forEach(function(el){ el.classList.toggle('sel', el.dataset.us  === (prefs.uiStyle      || 'glass'));   });
+  document.querySelectorAll('[data-fs]').forEach(function(el){     el.classList.toggle('sel', el.dataset.fs  === (prefs.flipStyle    || '3d'));      });
+  document.querySelectorAll('[data-tf]').forEach(function(el){     el.classList.toggle('sel', el.dataset.tf  === (prefs.timeFormat   || '12h'));     });
+  document.querySelectorAll('[data-tu]').forEach(function(el){     el.classList.toggle('sel', el.dataset.tu  === (prefs.tempUnit     || 'F'));       });
+  document.querySelectorAll('[data-ts]').forEach(function(el){     el.classList.toggle('sel', el.dataset.ts  === (prefs.timerStyle   || 'circle'));  });
+  document.querySelectorAll('[data-tcm]').forEach(function(el){    el.classList.toggle('sel', el.dataset.tcm === (prefs.textColorMode|| 'light'));   });
+  document.querySelectorAll('[data-bgfit]').forEach(function(el){  el.classList.toggle('sel', el.dataset.bgfit === (prefs.bgFit      || 'contain')); });
+  document.querySelectorAll('[data-bgtarget]').forEach(function(el){el.classList.toggle('sel', el.dataset.bgtarget === (prefs.bgTarget|| 'page'));   });
+
+  // Calendar view picker (uses individual button IDs instead of data attrs)
+  ['week','month','agenda'].forEach(function(x){
+    var b = document.getElementById('cs-' + x);
+    if (b) b.classList.toggle('sel', x === (prefs.calMode || 'week'));
+  });
+
+  // Sliders + readouts
+  var orR = document.getElementById('overlay-range'); if (orR) orR.value      = prefs.bgOverlay     || 60;
+  var ovV = document.getElementById('overlay-val');   if (ovV) ovV.textContent = (prefs.bgOverlay   || 60)  + '%';
+  var brR = document.getElementById('bright-range');  if (brR) brR.value      = prefs.textBrightness|| 100;
+  var bvV = document.getElementById('bright-val');    if (bvV) bvV.textContent = (prefs.textBrightness|| 100) + '%';
+
+  // Custom text color row only shows when mode is 'custom'
+  var tcr = document.getElementById('text-color-custom-row');
+  if (tcr) tcr.style.display = (prefs.textColorMode === 'custom') ? 'flex' : 'none';
+  var tcp = document.getElementById('text-color-pick');
+  if (tcp && prefs.textColorCustom) tcp.value = prefs.textColorCustom;
+
+  // Widget border color picker (only set if there's a saved value — keeps native default otherwise)
+  var wbp = document.getElementById('widget-border-pick');
+  if (wbp && prefs.widgetBorderColor) wbp.value = prefs.widgetBorderColor;
+
+  switchSmxTab('appearance');
+  buildBgPresets();
+  openModal('settings-modal');
+}
+
+// Switch the active pane in the Settings modal (Appearance / Background / Text / Preferences).
+function switchSmxTab(pane){
+  document.querySelectorAll('.smx-tab').forEach(function(t){ t.classList.toggle('active', t.dataset.pane === pane); });
+  document.querySelectorAll('.smx .pane').forEach(function(p){ p.classList.toggle('active', p.dataset.pane === pane); });
+}
+
+// Save all prefs to the server and close the modal.
+function saveAllSettings(){
+  google.script.run.withSuccessHandler(function(){ toast('Settings saved!', 'ok'); }).saveMyPrefs(JSON.stringify(prefs));
+  closeModal('settings-modal');
+}
+
+// Reset all settings to defaults — but PRESERVE the user's data:
+// scores, countdowns, notes/task tabs, and their list mappings.
+// Re-applies, re-renders home, persists, closes modal.
+function resetAllSettings(){
+  if (!confirm('Reset all settings to defaults? This cannot be undone.')) return;
+
+  // Merge DEF_PREFS over a curated set of fields the user shouldn't lose
+  prefs = Object.assign({}, DEF_PREFS, {
+    uiStyle:        'glass',
+    testingScores:  prefs.testingScores  || {goal:null, entries:{}},
+    countdowns:     prefs.countdowns     || [],
+    notesTabs:      prefs.notesTabs      || [{id:'default', name:'Notes', color:'#6366f1'}],
+    notesActiveTab: prefs.notesActiveTab || 'default',
+    taskLists:      prefs.taskLists      || [{id:'default', name:'All Tasks', color:'#6366f1'}],
+    taskActiveList: prefs.taskActiveList || 'default',
+    taskListMap:    prefs.taskListMap    || {},
+    taskSort:       'default',
+    tileOrder:      ['clock','schedule','tasks','notes','links'],
+    minimizedWidgets: [],
+    tileSizes:      {},
+    widgetStyles:   {}
+  });
+
+  applyAllPrefs();
+  reloadHomeWidgets();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  closeModal('settings-modal');
+  toast('Settings reset to defaults', 'inf');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. BACKGROUND CONTROLS
+   Three independent paths — preset gradient, solid color, or image URL.
+   Plus image fit (contain/cover/stretch/auto), target (page vs widget),
+   and overlay opacity (image only).
+   applyBackground() is the actual painter — everything else mutates
+   prefs and calls it.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the gradient preset cards into #bg-presets, marking the
+// currently-selected one. Re-called whenever the bg type changes.
+function buildBgPresets(){
+  var g = document.getElementById('bg-presets');
+  if (!g) return;
+  g.innerHTML = BG_PRESETS.map(function(p){
+    return '<div class="bg-preset' + (prefs.bgType === 'preset' && prefs.bgValue === p.id ? ' sel' : '') + '" '
+      + 'style="background:' + p.css + ';" onclick="pickBgPreset(\'' + p.id + '\')">'
+      + '<span class="bg-preset-lbl">' + p.name + '</span></div>';
+  }).join('');
+}
+
+// User clicked a gradient preset card.
+function pickBgPreset(id){
+  prefs.bgType = 'preset';
+  prefs.bgValue = id;
+  applyBackground();
+  buildBgPresets();
+}
+
+// User picked a solid color from the color input.
+function setBgColor(v){
+  prefs.bgType = 'color';
+  prefs.bgValue = v;
+  applyBackground();
+  buildBgPresets();
+}
+
+// Apply the URL the user typed in the image-URL field.
+function setBgUrl(){
+  var u = document.getElementById('bg-url-input').value.trim();
+  if (!u){ toast('Enter an image URL', 'err'); return; }
+  prefs.bgType = 'image';
+  prefs.bgValue = u;
+  applyBackground();
+  buildBgPresets();
+}
+
+// Reset background back to "no override" — uses the UI style's default.
+function clearBg(){
+  prefs.bgType = 'default';
+  prefs.bgValue = '';
+  applyBackground();
+  buildBgPresets();
+}
+
+// Update the dark-overlay opacity (only meaningful when bgType is 'image').
+function setOverlay(v){
+  prefs.bgOverlay = Number(v);
+  document.getElementById('overlay-val').textContent = v + '%';
+  applyBackground();
+}
+
+// Set image fit mode (contain / cover / 100% 100% / auto).
+function setBgFit(v){
+  prefs.bgFit = v;
+  applyBackground();
+}
+
+// User picked a fit mode from the segmented control.
+function pickBgFit(v){
+  setBgFit(v);
+  document.querySelectorAll('[data-bgfit]').forEach(function(el){ el.classList.toggle('sel', el.dataset.bgfit === v); });
+}
+
+// Set bg target (whole page vs each widget).
+function setBgTarget(v){
+  prefs.bgTarget = v;
+  applyBackground();
+}
+
+// User picked a target from the segmented control.
+function pickBgTarget(v){
+  setBgTarget(v);
+  document.querySelectorAll('[data-bgtarget]').forEach(function(el){ el.classList.toggle('sel', el.dataset.bgtarget === v); });
+}
+
+// Paint the background to match current prefs.
+// Branches:
+//   1) image + target=widgets → images go on each widget card via CSS vars
+//   2) bgType default/preset/color/image → straightforward bg/overlay
+//   3) UI style override → a few light themes own their own bg even
+//      when bgType is unset (zen, notebook, sunrise) so they don't get
+//      a default dark page underneath them.
+function applyBackground(){
+  var bg = document.getElementById('bg-layer');
+  var ov = document.getElementById('bg-overlay');
+  var bt = prefs.bgType;
+  var bv = prefs.bgValue;
+  var bo = prefs.bgOverlay;
+  var target = prefs.bgTarget || 'page';
+
+  // Reset widget-bg mode before each paint (otherwise it sticks across changes)
+  document.body.classList.remove('widget-bg-mode');
+  document.documentElement.style.removeProperty('--widget-bg-image');
+  document.documentElement.style.removeProperty('--widget-bg-size');
+
+  // ── Branch 1: image applied to each widget instead of the page ──
+  if (bt === 'image' && target === 'widgets'){
+    bg.style.background = 'var(--bg)';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+    document.documentElement.style.setProperty('--widget-bg-image', 'url(' + bv + ')');
+    document.documentElement.style.setProperty('--widget-bg-size',  prefs.bgFit || 'cover');
+    document.body.classList.add('widget-bg-mode');
+    return;
+  }
+
+  // ── Branch 2: standard page-level backgrounds ──
+  if (bt === 'default' || !bt){
+    bg.style.background = 'var(--bg)';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (bt === 'preset'){
+    var p = BG_PRESETS.filter(function(x){ return x.id === bv; })[0];
+    if (p){ bg.style.background = p.css; bg.style.backgroundSize = 'cover'; }
+    ov.style.background = 'transparent';
+  } else if (bt === 'color'){
+    bg.style.background = bv;
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (bt === 'image'){
+    var fit = prefs.bgFit || 'contain';
+    bg.style.background = 'url(' + bv + ') center no-repeat #0a0e1a';
+    bg.style.backgroundSize = fit;
+    ov.style.background = 'rgba(0,0,0,' + ((bo || 60) / 100) + ')';
+  }
+
+  // ── Branch 3: light/themed UI styles override the page bg ──
+  // These themes need their own warm/light backgrounds even when the
+  // user hasn't explicitly chosen one. Some only kick in when bgType
+  // is unset, so a user-picked image still wins.
+  var _us = prefs.uiStyle || 'glass';
+  if (_us === 'zen'){
+    bg.style.background = '#eceae4';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (_us === 'notebook'){
+    bg.style.background = '#fdf8eb';
+    bg.style.backgroundImage = 'repeating-linear-gradient(0deg,transparent 0,transparent 27px,rgba(31,43,77,.09) 28px)';
+    bg.style.backgroundSize = '100% 28px';
+    ov.style.background = 'transparent';
+  } else if (_us === 'sunrise'){
+    bg.style.background = 'linear-gradient(180deg,#fcf0d8 0%,#fbf5ea 100%)';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (_us === 'sporty' && (bt === 'default' || !bt)){
+    bg.style.background = '#0e1633';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (_us === 'zen-dark' && (bt === 'default' || !bt)){
+    bg.style.background = '#111110';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  } else if (_us === 'notebook-dark'){
+    bg.style.background = '#0d1220';
+    bg.style.backgroundImage = 'repeating-linear-gradient(0deg,transparent 0,transparent 27px,rgba(255,255,255,.04) 28px)';
+    bg.style.backgroundSize = '100% 28px';
+    ov.style.background = 'transparent';
+  } else if (_us === 'sunrise-dark' && (bt === 'default' || !bt)){
+    bg.style.background = 'linear-gradient(180deg,#1e1808 0%,#141006 100%)';
+    bg.style.backgroundImage = 'none';
+    bg.style.backgroundSize = '';
+    ov.style.background = 'transparent';
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. TEXT CONTROLS
+   Brightness slider applies a CSS filter to body.
+   Color mode is a 4-way picker (light/warm/dark/custom). Custom mode
+   reveals a color input. Widget border lets the user override the
+   --card-border CSS var.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Slider handler — also updates the % readout.
+function setTextBright(v){
+  prefs.textBrightness = Number(v);
+  document.getElementById('bright-val').textContent = v + '%';
+  applyTextBrightness(Number(v));
+}
+
+// Apply text brightness as a CSS filter. 100 = no filter (cleanest).
+function applyTextBrightness(v){
+  document.body.style.filter = v === 100 ? '' : 'brightness(' + v + '%)';
+}
+
+// Switch between the four color modes. Reveals/hides the custom color row.
+function pickTextColor(mode){
+  prefs.textColorMode = mode;
+  document.querySelectorAll('[data-tcm]').forEach(function(el){ el.classList.toggle('sel', el.dataset.tcm === mode); });
+  var row = document.getElementById('text-color-custom-row');
+  if (row) row.style.display = mode === 'custom' ? 'flex' : 'none';
+  applyTextColor(mode, prefs.textColorCustom || '');
+}
+
+// Custom-mode color input handler.
+function setCustomTextColor(v){
+  prefs.textColorCustom = v;
+  applyTextColor('custom', v);
+}
+
+// Push text-color overrides to the page. Each mode sets all four text
+// shades (--tx through --tx4); 'light' (default) clears overrides
+// entirely so the active UI style's variables show through.
+function applyTextColor(mode, custom){
+  var r = document.documentElement.style;
+  if (mode === 'dark'){
+    r.setProperty('--tx',  '#1a1a2e');
+    r.setProperty('--tx2', '#2d3748');
+    r.setProperty('--tx3', '#4a5568');
+    r.setProperty('--tx4', '#718096');
+  } else if (mode === 'warm'){
+    r.setProperty('--tx',  '#f5efe6');
+    r.setProperty('--tx2', '#c9b99a');
+    r.setProperty('--tx3', '#8a7560');
+    r.setProperty('--tx4', '#5c4d3c');
+  } else if (mode === 'custom' && custom){
+    r.setProperty('--tx',  custom);
+    r.setProperty('--tx2', custom);
+    r.setProperty('--tx3', custom);
+    r.setProperty('--tx4', custom);
+  } else {
+    // 'light' or missing custom — clear overrides so theme defaults apply
+    r.removeProperty('--tx');
+    r.removeProperty('--tx2');
+    r.removeProperty('--tx3');
+    r.removeProperty('--tx4');
+  }
+}
+
+// Override (or clear) the global widget border color via the --card-border CSS var.
+function applyWidgetBorder(color){
+  if (color) document.documentElement.style.setProperty('--card-border', color);
+  else       document.documentElement.style.removeProperty('--card-border');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. FLIP ANIMATION STYLE
+   The four flip styles (3d / morph / fold / slide) are CSS-only,
+   keyed off body[data-flip="..."]. This just sets the attribute and
+   updates the picker.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// User picked a flip animation in the Settings modal.
+function pickFlipStyle(s){
+  prefs.flipStyle = s;
+  document.body.dataset.flip = s;
+  document.querySelectorAll('[data-fs]').forEach(function(el){ el.classList.toggle('sel', el.dataset.fs === s); });
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   8. PER-WIDGET STYLE PICKERS
+   Two flavors:
+     - The Settings-modal version (pickClockStyle / pickTimerStyle) just
+       updates prefs and re-renders the home grid.
+     - The from-widget version (pickClockStyleFromWidget / Timer...) is
+       called from a widget's flip back. It saves prefs, re-renders the
+       widget face, and updates the back panel's selected button without
+       leaving the back panel.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Settings-modal: change the global clock style and reload home widgets.
+function pickClockStyle(s){
+  prefs.clockStyle = s;
+  document.querySelectorAll('.style-opt[data-cs]').forEach(function(el){ el.classList.toggle('sel', el.dataset.cs === s); });
+  reloadHomeWidgets();
+}
+
+// Settings-modal: change the global timer style and re-render the timer body.
+function pickTimerStyle(s){
+  prefs.timerStyle = s;
+  document.querySelectorAll('[data-ts]').forEach(function(el){ el.classList.toggle('sel', el.dataset.ts === s); });
+  var ta = document.getElementById('timer-widget-body');
+  if (ta) renderTimerBody();
+}
+
+// From the clock widget's flip back: change clock style without leaving
+// the back panel. Re-renders just the front face + updates the back's
+// own picker buttons by inspecting their onclick attributes.
+function pickClockStyleFromWidget(s){
+  prefs.clockStyle = s;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+
+  // Repaint just this widget's front face
+  var tile = document.getElementById('tile-clock');
+  if (tile){
+    var front = tile.querySelector('.face-front');
+    if (front){
+      try { front.innerHTML = WIDGET_HTML.clock(); } catch(e){}
+    }
+  }
+
+  // Mark the active option on the back panel — looks at each button's
+  // onclick string for the matching value
+  var back = document.getElementById('tb-clock');
+  if (back){
+    back.querySelectorAll('.style-opts .style-opt').forEach(function(el){
+      var m = el.getAttribute('onclick') || '';
+      el.classList.toggle('sel', m.indexOf("'" + s + "'") > -1);
+    });
+  }
+  tickClock();
+}
+
+// From the timer widget's flip back: change timer style without leaving
+// the back panel. Mirrors pickClockStyleFromWidget's pattern.
+function pickTimerStyleFromWidget(s){
+  prefs.timerStyle = s;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+
+  var back = document.getElementById('tb-timer');
+  if (back){
+    back.querySelectorAll('.style-opts .style-opt').forEach(function(el){
+      var m = el.getAttribute('onclick') || '';
+      el.classList.toggle('sel', m.indexOf("'" + s + "'") > -1);
+    });
+  }
+  renderTimerBody();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. CALENDAR MODE PICKER
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Pick the default calendar view (week / month / agenda).
+// Updates both the prefs key and the calendar tab's runtime cursor.
+function pickCalMode(m){
+  prefs.calMode = m;
+  calIframeMode = m;
+  ['week','month','agenda'].forEach(function(x){
+    var b = document.getElementById('cs-' + x);
+    if (b) b.classList.toggle('sel', x === m);
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   10. SCHEDULE CUSTOM COLUMNS
+   Lets users add their own columns to the Schedule widget (e.g.
+   "Homework," "Materials"). Stored in prefs.schedCustomCols and
+   the per-period values live on each period's `custom` map.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Prompt for a new column name and add it to the schedule widget.
+// Re-flips the widget so the user can edit values for the new column.
+function flipAddCustomCol(){
+  var name = prompt('Column name (e.g. Homework, Topic, Materials):');
+  if (!name || !name.trim()) return;
+
+  if (!prefs.schedCustomCols) prefs.schedCustomCols = [];
+  prefs.schedCustomCols.push({id:'cc-' + Date.now(), name:name.trim()});
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  flipWidget('schedule');
+}
+
+// Delete a custom column. Also clears the corresponding value on every
+// period in mySchedule so the data goes away cleanly.
+function flipDelCustomCol(colId){
+  if (!confirm('Remove this column? Data in that column will be lost.')) return;
+
+  prefs.schedCustomCols = (prefs.schedCustomCols || []).filter(function(c){ return c.id !== colId; });
+  // Strip any per-period values for this column
+  mySchedule.forEach(function(p){ if (p.custom) delete p.custom[colId]; });
+
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  google.script.run.saveMySchedule(JSON.stringify(mySchedule));
+  flipWidget('schedule');
+}
+
+</script>

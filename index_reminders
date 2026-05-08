@@ -1,11 +1,47 @@
 <script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_reminders.html — REMINDERS CHUNK
+   ║  ─────────────────────────────────────
+   ║  Owns the reminders system: bell badge, panel, list widget, toasts,
+   ║  and the inline-save form on the widget's flip back.
+   ║
+   ║  Server functions called: getMyReminders, addMyReminder,
+   ║  dismissReminder, deleteReminder. (Defined in Code.gs → Lib.)
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. STATE (cached reminders + UI flags)
+   ║   2. DATA LOADING (loadReminders)
+   ║   3. RENDERERS (widget list + bell panel)
+   ║   4. TOASTS (auto-show newest, manual close)
+   ║   5. BELL BADGE (count, toggle, today/tomorrow filter)
+   ║   6. EVENT HANDLERS (dismiss, delete, save inline)
+   ║   7. HELPERS (remTimeAgo formatting, click-outside listener)
+   ═══════════════════════════════════════════════════════════════════ */
 
-// ─── REMINDERS ────────────────────────────────────────────────
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. STATE
+   _myReminders is the current cached list (refreshed by loadReminders).
+   _shownToastIds tracks which reminders have already shown a toast so
+   we don't re-toast the same one on every refresh.
+   _remBellOpen is true when the bell panel is currently open.
+   ═══════════════════════════════════════════════════════════════════ */
 var _myReminders = [];
 var _shownToastIds = {};
+var _remBellOpen = false;
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. DATA LOADING
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch the user's reminders from the server, then re-render the widget,
+// fire any pending toast, and update the bell badge.
 function loadReminders(){
   var area = document.getElementById('reminders-area');
-  if(area) showWidgetLoader('reminders','sm');
+  if (area) showWidgetLoader('reminders', 'sm');
+
   google.script.run.withSuccessHandler(function(r){
     _myReminders = (r && r.reminders) ? r.reminders : [];
     renderRemindersWidget();
@@ -13,121 +49,64 @@ function loadReminders(){
     hideWidgetLoader('reminders');
   }).withFailureHandler(function(){
     hideWidgetLoader('reminders');
-    if(area) area.innerHTML = '<div class="rem-empty">Could not load reminders.</div>';
+    if (area) area.innerHTML = '<div class="rem-empty">Could not load reminders.</div>';
   }).getMyReminders();
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. RENDERERS
+   The widget body (#reminders-area) shows ALL reminders.
+   The bell panel (#rem-bell-list) shows only today + tomorrow.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the full reminders list inside the widget body.
+// Each row shows a colored source pill (TEACHER/SCHOOL/REMINDER), title,
+// body, time-ago, and an X button (only if user can delete it).
 function renderRemindersWidget(){
   updateRemBell();
   var area = document.getElementById('reminders-area');
-  if(!area) return;
-  if(!_myReminders.length){
+  if (!area) return;
+
+  if (!_myReminders.length){
     area.innerHTML = '<div class="rem-empty">No active reminders. Click + Add to set one.</div>';
     return;
   }
+
   area.innerHTML = '<div class="rem-list">' + _myReminders.map(function(r){
-    var src = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
-    var when = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.isRipe ? 'Right now' : '');
-    var label = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
+    // Normalize source — anything other than teacher/admin is rendered as student
+    var src     = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
+    var when    = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.isRipe ? 'Right now' : '');
+    var label   = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
     var canDelete = r.isMine || (CU && CU.realRole === 'teacher');
     var ripeCls = r.isRipe ? '' : ' upcoming';
+
     return '<div class="rem-row ' + src + ripeCls + '" onclick="dismissReminderClick(\'' + r.id + '\')">'
       + '<div class="rem-row-top">'
-      + '<span class="rem-pill ' + src + '">' + label + (r.isRipe ? '' : ' • UPCOMING') + '</span>'
-      + (canDelete ? '<button class="rem-row-x" onclick="event.stopPropagation();deleteReminderClick(\'' + r.id + '\')" title="Delete"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>' : '<span></span>')
+      +   '<span class="rem-pill ' + src + '">' + label + (r.isRipe ? '' : ' • UPCOMING') + '</span>'
+      +   (canDelete
+            ? '<button class="rem-row-x" onclick="event.stopPropagation();deleteReminderClick(\'' + r.id + '\')" title="Delete"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>'
+            : '<span></span>')
       + '</div>'
       + '<div class="rem-row-title">' + esc(r.title) + '</div>'
       + (r.body ? '<div class="rem-row-body">' + esc(r.body) + '</div>' : '')
-      + (when ? '<div class="rem-row-time">' + when + '</div>' : '')
+      + (when   ? '<div class="rem-row-time">' + when + '</div>' : '')
       + '</div>';
   }).join('') + '</div>';
 }
 
-function showNewestRemindersToast(){
-  // Show the newest unseen reminder as a toast like the screenshot
-  for(var i = 0; i < _myReminders.length; i++){
-    var r = _myReminders[i];
-    if(_shownToastIds[r.id]) continue;
-    _shownToastIds[r.id] = true;
-    showReminderToast(r);
-    break; // only one at a time
-  }
-}
-function showReminderToast(r){
-  // Remove any existing toast
-  var existing = document.getElementById('rem-toast-' + r.id);
-  if(existing) return;
-  var prev = document.querySelector('.rem-toast');
-  if(prev) prev.remove();
-  var src = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
-  var label = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
-  var when = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.createdAt ? remTimeAgo(r.createdAt) : '');
-  var toast = document.createElement('div');
-  toast.className = 'rem-toast ' + src;
-  toast.id = 'rem-toast-' + r.id;
-  toast.innerHTML = '<div class="rem-toast-top">'
-    + '<span class="rem-pill ' + src + '">' + label + '</span>'
-    + '<button class="rem-toast-x" onclick="closeReminderToast(\'' + r.id + '\')">\u00d7</button>'
-    + '</div>'
-    + '<div class="rem-toast-title">' + esc(r.title) + '</div>'
-    + (r.body ? '<div class="rem-toast-body">' + esc(r.body) + '</div>' : '')
-    + (when ? '<div class="rem-toast-time">' + when + '</div>' : '');
-  document.body.appendChild(toast);
-  // Auto-fade after 12s
-  setTimeout(function(){
-    if(document.getElementById('rem-toast-' + r.id)) closeReminderToast(r.id);
-  }, 12000);
-}
-function closeReminderToast(id){
-  var el = document.getElementById('rem-toast-' + id);
-  if(el) el.remove();
-}
-function dismissReminderClick(id){
-  if(!confirm('Dismiss this reminder?')) return;
-  google.script.run.withSuccessHandler(function(r){
-    if(r && r.success){
-      _myReminders = _myReminders.filter(function(x){return x.id !== id;});
-      renderRemindersWidget();
-      closeReminderToast(id);
-      toast('Dismissed','inf');
-    } else toast(r.error || 'Could not dismiss','err');
-  }).dismissReminder(id);
-}
-var _remBellOpen = false;
-function _remIsTodayOrTomorrow(r){
-  if(r.isRipe) return true;
-  if(!r.triggerAt) return true;
-  var t = new Date(r.triggerAt);
-  if(isNaN(t)) return false;
-  var now = new Date();
-  var endOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate()+2, 0, 0, 0);
-  return t < endOfTomorrow;
-}
-function updateRemBell(){
-  var bell = document.getElementById('rem-bell');
-  if(!bell) return;
-  var arr = (_myReminders||[]).filter(_remIsTodayOrTomorrow);
-  var n = arr.length;
-  var countEl = bell.querySelector('.rem-bell-count');
-  if(countEl) countEl.textContent = n > 99 ? '99+' : n;
-  bell.style.display = n > 0 ? 'flex' : 'none';
-  if(_remBellOpen) renderRemBellPanel();
-}
-function toggleRemBell(e){
-  if(e) e.stopPropagation();
-  _remBellOpen = !_remBellOpen;
-  var p = document.getElementById('rem-bell-panel');
-  if(!p) return;
-  p.style.display = _remBellOpen ? 'block' : 'none';
-  if(_remBellOpen) renderRemBellPanel();
-}
+// Render the bell panel list (today + tomorrow only).
+// Lighter weight than the widget — no source pills, no delete buttons.
 function renderRemBellPanel(){
   var list = document.getElementById('rem-bell-list');
-  if(!list) return;
-  var items = (_myReminders||[]).filter(_remIsTodayOrTomorrow);
-  if(!items.length){
+  if (!list) return;
+
+  var items = (_myReminders || []).filter(_remIsTodayOrTomorrow);
+  if (!items.length){
     list.innerHTML = '<div style="font-size:12px;opacity:.6;text-align:center;padding:10px;">Nothing for today or tomorrow.</div>';
     return;
   }
+
   list.innerHTML = items.map(function(r){
     var when = r.triggerAt ? remTimeAgo(r.triggerAt) : 'Right now';
     return '<div class="rem-bell-row">'
@@ -137,66 +116,222 @@ function renderRemBellPanel(){
       + '</div>';
   }).join('');
 }
-document.addEventListener('click', function(e){
-  if(!_remBellOpen) return;
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. TOASTS
+   When a new reminder appears, the newest unseen one shows as a toast
+   in the top-right. Auto-fades after 12s; can be closed manually.
+   Only one toast at a time.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Find the first unseen reminder and toast it (one at a time).
+function showNewestRemindersToast(){
+  for (var i = 0; i < _myReminders.length; i++){
+    var r = _myReminders[i];
+    if (_shownToastIds[r.id]) continue;
+    _shownToastIds[r.id] = true;
+    showReminderToast(r);
+    break; // only one at a time
+  }
+}
+
+// Build the toast DOM for a single reminder and append it to body.
+function showReminderToast(r){
+  // Bail if this exact toast is already in the DOM
+  var existing = document.getElementById('rem-toast-' + r.id);
+  if (existing) return;
+
+  // Remove any other reminder toast that's currently showing
+  var prev = document.querySelector('.rem-toast');
+  if (prev) prev.remove();
+
+  var src   = (r.source === 'teacher' || r.source === 'admin') ? r.source : 'student';
+  var label = src === 'teacher' ? 'TEACHER' : src === 'admin' ? 'SCHOOL' : 'REMINDER';
+  var when  = r.triggerAt ? remTimeAgo(r.triggerAt) : (r.createdAt ? remTimeAgo(r.createdAt) : '');
+
+  var toast = document.createElement('div');
+  toast.className = 'rem-toast ' + src;
+  toast.id = 'rem-toast-' + r.id;
+  toast.innerHTML = '<div class="rem-toast-top">'
+    +   '<span class="rem-pill ' + src + '">' + label + '</span>'
+    +   '<button class="rem-toast-x" onclick="closeReminderToast(\'' + r.id + '\')">\u00d7</button>'
+    + '</div>'
+    + '<div class="rem-toast-title">' + esc(r.title) + '</div>'
+    + (r.body ? '<div class="rem-toast-body">' + esc(r.body) + '</div>' : '')
+    + (when   ? '<div class="rem-toast-time">' + when + '</div>' : '');
+  document.body.appendChild(toast);
+
+  // Auto-fade after 12s
+  setTimeout(function(){
+    if (document.getElementById('rem-toast-' + r.id)) closeReminderToast(r.id);
+  }, 12000);
+}
+
+// Remove a specific reminder toast from the DOM (no-op if already gone).
+function closeReminderToast(id){
+  var el = document.getElementById('rem-toast-' + id);
+  if (el) el.remove();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. BELL BADGE
+   Floating gold circle bottom-right showing today/tomorrow count.
+   Click to toggle the panel open/closed. Click outside to close.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Returns true if a reminder is "ripe" (already triggered) or fires
+// before the end of tomorrow. Used to decide what counts toward the bell.
+function _remIsTodayOrTomorrow(r){
+  if (r.isRipe) return true;
+  if (!r.triggerAt) return true;          // no trigger time → assume soon
+  var t = new Date(r.triggerAt);
+  if (isNaN(t)) return false;
+  var now = new Date();
+  var endOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2, 0, 0, 0);
+  return t < endOfTomorrow;
+}
+
+// Update the bell's number badge and visibility based on current count.
+// Hidden entirely when count is 0. Refreshes the open panel if any.
+function updateRemBell(){
   var bell = document.getElementById('rem-bell');
+  if (!bell) return;
+
+  var arr = (_myReminders || []).filter(_remIsTodayOrTomorrow);
+  var n = arr.length;
+
+  var countEl = bell.querySelector('.rem-bell-count');
+  if (countEl) countEl.textContent = n > 99 ? '99+' : n;
+  bell.style.display = n > 0 ? 'flex' : 'none';
+
+  if (_remBellOpen) renderRemBellPanel();
+}
+
+// Toggle the bell panel open/closed. e.stopPropagation so the
+// click-outside handler doesn't immediately close it.
+function toggleRemBell(e){
+  if (e) e.stopPropagation();
+  _remBellOpen = !_remBellOpen;
+  var p = document.getElementById('rem-bell-panel');
+  if (!p) return;
+  p.style.display = _remBellOpen ? 'block' : 'none';
+  if (_remBellOpen) renderRemBellPanel();
+}
+
+// Click-outside-to-close listener (registered once on load).
+// Ignores clicks inside the bell or the panel itself.
+document.addEventListener('click', function(e){
+  if (!_remBellOpen) return;
+  var bell  = document.getElementById('rem-bell');
   var panel = document.getElementById('rem-bell-panel');
-  if(bell && bell.contains(e.target)) return;
-  if(panel && panel.contains(e.target)) return;
+  if (bell  && bell.contains(e.target))  return;
+  if (panel && panel.contains(e.target)) return;
   _remBellOpen = false;
-  if(panel) panel.style.display = 'none';
+  if (panel) panel.style.display = 'none';
 });
-function deleteReminderClick(id){
-  if(!confirm('Delete this reminder for everyone?')) return;
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. EVENT HANDLERS
+   Called from inline onclick handlers in the rendered HTML above.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// User clicked a reminder row → confirm dismiss → server call → re-render.
+// "Dismiss" hides it for this user only (the Reminders sheet keeps it for others).
+function dismissReminderClick(id){
+  if (!confirm('Dismiss this reminder?')) return;
   google.script.run.withSuccessHandler(function(r){
-    if(r && r.success){
-      _myReminders = _myReminders.filter(function(x){return x.id !== id;});
+    if (r && r.success){
+      _myReminders = _myReminders.filter(function(x){ return x.id !== id; });
       renderRemindersWidget();
       closeReminderToast(id);
-      toast('Deleted','inf');
-    } else toast(r.error || 'Could not delete','err');
+      toast('Dismissed', 'inf');
+    } else {
+      toast(r.error || 'Could not dismiss', 'err');
+    }
+  }).dismissReminder(id);
+}
+
+// User clicked the X on a reminder they own → confirm delete →
+// server call deletes for everyone → re-render.
+function deleteReminderClick(id){
+  if (!confirm('Delete this reminder for everyone?')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){
+      _myReminders = _myReminders.filter(function(x){ return x.id !== id; });
+      renderRemindersWidget();
+      closeReminderToast(id);
+      toast('Deleted', 'inf');
+    } else {
+      toast(r.error || 'Could not delete', 'err');
+    }
   }).deleteReminder(id);
 }
+
+// Inline-save handler for the Add Reminder form on the widget's flip back.
+// Reads title/body/when from the form, posts to addMyReminder,
+// closes the flip, and reloads.
 function saveMyReminderInline(){
-  var title = (document.getElementById('rem-title')||{}).value || '';
-  var body = (document.getElementById('rem-body')||{}).value || '';
-  var when = (document.getElementById('rem-when')||{}).value || '';
-  if(!title.trim()){toast('Title is required','err'); return;}
+  var title = (document.getElementById('rem-title') || {}).value || '';
+  var body  = (document.getElementById('rem-body')  || {}).value || '';
+  var when  = (document.getElementById('rem-when')  || {}).value || '';
+
+  if (!title.trim()){ toast('Title is required', 'err'); return; }
+
+  // Convert datetime-local string → ISO. Empty string means no schedule (fires immediately).
   var triggerISO = when ? new Date(when).toISOString() : '';
+
   google.script.run.withSuccessHandler(function(r){
-    if(r && r.success){
+    if (r && r.success){
       unflipWidget('reminders');
-      toast('Reminder saved','ok');
+      toast('Reminder saved', 'ok');
       loadReminders();
-    } else toast((r && r.error) || 'Error saving reminder','err');
+    } else {
+      toast((r && r.error) || 'Error saving reminder', 'err');
+    }
   }).addMyReminder(title.trim(), body.trim(), triggerISO, '', '');
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. HELPERS
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Convert an ISO timestamp into a friendly relative string.
+// Examples: "in 5 min", "in 2h", "tomorrow", "in 3 days", "Mar 14",
+//           "just now", "5 min ago", "2h ago", "yesterday", "3d ago".
+// Returns '' on parse failure.
 function remTimeAgo(iso){
-  if(!iso) return '';
+  if (!iso) return '';
   try {
     var d = new Date(iso);
-    if(isNaN(d)) return '';
+    if (isNaN(d)) return '';
     var diffMs = d.getTime() - Date.now();
     var future = diffMs > 0;
     var absMin = Math.abs(Math.round(diffMs / 60000));
-    var absHr = Math.round(absMin / 60);
-    var absDy = Math.round(absHr / 24);
-    if(future){
-      if(absMin < 1) return 'in a moment';
-      if(absMin < 60) return 'in ' + absMin + ' min';
-      if(absHr < 24) return 'in ' + absHr + 'h';
-      if(absDy === 1) return 'tomorrow';
-      if(absDy < 7) return 'in ' + absDy + ' days';
-      return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    var absHr  = Math.round(absMin / 60);
+    var absDy  = Math.round(absHr / 24);
+
+    if (future){
+      if (absMin < 1)  return 'in a moment';
+      if (absMin < 60) return 'in ' + absMin + ' min';
+      if (absHr < 24)  return 'in ' + absHr + 'h';
+      if (absDy === 1) return 'tomorrow';
+      if (absDy < 7)   return 'in ' + absDy + ' days';
+      return d.toLocaleDateString(undefined, { month:'short', day:'numeric' });
     } else {
-      if(absMin < 1) return 'just now';
-      if(absMin < 60) return absMin + ' min ago';
-      if(absHr < 24) return absHr + 'h ago';
-      if(absDy === 1) return 'yesterday';
-      if(absDy < 7) return absDy + 'd ago';
-      return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+      if (absMin < 1)  return 'just now';
+      if (absMin < 60) return absMin + ' min ago';
+      if (absHr < 24)  return absHr + 'h ago';
+      if (absDy === 1) return 'yesterday';
+      if (absDy < 7)   return absDy + 'd ago';
+      return d.toLocaleDateString(undefined, { month:'short', day:'numeric' });
     }
-  } catch(e) { return ''; }
+  } catch(e){
+    return '';
+  }
 }
 
 </script>

@@ -1,0 +1,998 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_teacher_widgets.html — TEACHER TOOLS TAB CHUNK
+   ║  ───────────────────────────────────────────────────
+   ║  Owns the Teacher Tools tab: 6 widgets in a draggable/resizable grid.
+   ║  Only renders for users with role === 'teacher' (router enforces this).
+   ║
+   ║  Widgets (teacher tile IDs):
+   ║    tview   — View Student (browse a single student's planner)
+   ║    tgrp    — Groups (create/edit student groups)
+   ║    tpush   — Push Tasks (send a task to all/group/one student)
+   ║    talink  — Assign Links (push links to all/group/one student)
+   ║    tembed  — Embed Documents (push a Google Doc/Sheet/Slide/Form)
+   ║    trem    — Send Reminder (push a reminder to all/group/one student)
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. STATE (per-widget UI flags + caches)
+   ║   2. PAGE BUILDER (buildTeacherDashboard)
+   ║   3. TILE SIZE PICKER (openTSzPicker, pickTSz)
+   ║   4. WIDGET RENDERERS — shell HTML for each of the 6 widgets
+   ║   5. VIEW STUDENT — load + inline add/delete tasks
+   ║   6. PUSH TASKS — target picker + calendar-event opt-in
+   ║   7. ASSIGN LINKS — tabbed Add / Current Links
+   ║   8. EMBED DOCUMENTS — tabbed Embed New / Current Docs
+   ║   9. SEND REMINDER — target picker + datetime
+   ║  10. GROUPS MODAL (openGrpModal, doSaveGroup, doDelGroup)
+   ║  11. LEGACY PUSH PAGE (older standalone push UI — see notes)
+   ║  12. HELPERS (loadStuGroups data prefetch)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. STATE
+   Per-widget UI flags. Most widgets remember their currently-selected
+   target (all/group/individual) and which tab they're on.
+   _tvwActiveList tracks the View Student widget's task-list filter.
+   ═══════════════════════════════════════════════════════════════════ */
+
+var _tvwActiveList = 'default'; // currently-shown task list in View Student widget
+var _twPushTarget  = 'all';     // Push Tasks: 'all' | 'group' | 'individual'
+var _twLinkTarget  = 'all';     // Assign Links: 'all' | 'group' | 'individual'
+var _twLinkTab     = 'add';     // Assign Links: 'add' | 'list'
+var _twEdTarget    = 'all';     // Embed Docs: 'all' | 'group' | 'individual' | 'self'
+var _twEdTab       = 'add';     // Embed Docs: 'add' | 'list'
+var _twRemTarget   = 'all';     // Send Reminder: 'all' | 'group' | 'individual'
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. PAGE BUILDER
+   Builds the 6-widget grid. Order/size persist via prefs.teacherTileOrder
+   and prefs.teacherTileSizes. Loads students+groups first, then renders.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Build the Teacher Tools tab. Defers widget renders by 50ms so the
+// grid paints before any async loads kick in.
+function buildTeacherDashboard(){
+  // Tile definitions — one per teacher widget
+  var tileDefs = {
+    tview:  {fn:renderTViewWidget,     title:'View Student',    svg:'#w-student',    defC:2, defR:2},
+    tgrp:   {fn:renderTGroupsWidget,   title:'Groups',          svg:'#w-group',      defC:2, defR:2},
+    tpush:  {fn:renderTPushWidget,     title:'Push Tasks',      svg:'#w-push',       defC:2, defR:2},
+    talink: {fn:renderTLinkWidget,     title:'Assign Links',    svg:'#w-assignlink', defC:2, defR:2},
+    tembed: {fn:renderTEmbedWidget,    title:'Embed Documents', svg:'#w-embed',      defC:4, defR:2},
+    trem:   {fn:renderTReminderWidget, title:'Send Reminder',   svg:'#w-timer',      defC:2, defR:2}
+  };
+
+  // Reconcile saved order with the canonical default — drop unknown IDs,
+  // append any new IDs that weren't saved before.
+  var defaultOrder = ['tview','tgrp','tpush','talink','tembed','trem'];
+  if (!prefs.teacherTileOrder || !prefs.teacherTileOrder.length){
+    prefs.teacherTileOrder = defaultOrder.slice();
+  } else {
+    var saved = prefs.teacherTileOrder.filter(function(id){ return tileDefs[id]; });
+    defaultOrder.forEach(function(id){ if (saved.indexOf(id) === -1) saved.push(id); });
+    prefs.teacherTileOrder = saved;
+  }
+  if (!prefs.teacherTileSizes) prefs.teacherTileSizes = {};
+
+  // Empty grid first
+  panel('t-dash').innerHTML = '<div class="tile-grid" id="t-tile-grid" style="grid-auto-rows:minmax(180px,auto);"></div>';
+
+  // Pre-fetch students + groups so widgets like Push/Links/Embed can
+  // populate their dropdowns immediately on first render.
+  loadStuGroups(function(){
+    var grid = document.getElementById('t-tile-grid');
+    if (!grid) return;
+
+    grid.innerHTML = prefs.teacherTileOrder.map(function(id){
+      var t = tileDefs[id];
+      if (!t) return '';
+      var sz = prefs.teacherTileSizes[id] || {c:t.defC, r:t.defR};
+      var colSpan = Math.min(Math.max(sz.c || t.defC, 1), 4);
+      var rowSpan = Math.min(Math.max(sz.r || t.defR, 1), 3);
+      var minH = (rowSpan * 180) + ((rowSpan - 1) * 14);
+
+      return '<div class="tile" id="tile-' + id + '" draggable="true" data-tile="' + id + '" '
+        + 'style="grid-column:span ' + colSpan + ';grid-row:span ' + rowSpan + ';min-height:' + minH + 'px;">'
+        + '<div class="card" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">'
+        +   '<div class="card-top">'
+        +     '<div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="' + t.svg + '"/></svg> ' + t.title + '</div>'
+        +     '<div class="tile-gear" onclick="openTSzPicker(\'' + id + '\',event)" title="Resize"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4M3 3v4M13 13h-4M13 13v-4M3 13h4M3 13v-4M13 3h-4M13 3v4"/></svg></div>'
+        +   '</div>'
+        +   '<div class="t-widget-body t-widget-scroll" id="tw-' + id + '"><div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading...</div></div>'
+        + '</div></div>';
+    }).join('');
+
+    // Defer renders so DOM paints shells first; isolate per-widget errors.
+    setTimeout(function(){
+      prefs.teacherTileOrder.forEach(function(id){
+        var t = tileDefs[id];
+        if (!t) return;
+        try {
+          t.fn();
+        } catch(e){
+          var el = document.getElementById('tw-' + id);
+          if (el) el.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">Error: ' + esc(e.message) + '</div>';
+          console.error(e);
+        }
+      });
+      initDragDrop();
+    }, 50);
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. TILE SIZE PICKER
+   Floating popup over a tile's gear icon with a 4×2 grid of size choices.
+   Same UX as the admin tab's openASzPicker, but persists to
+   prefs.teacherTileSizes.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the size picker for a teacher tile. Clicking the same gear twice
+// closes the popup. Clicking outside also closes.
+function openTSzPicker(id, evt){
+  evt.stopPropagation();
+  var old = document.getElementById('sz-pop');
+  if (old){ old.remove(); if (old.dataset.wid === id) return; }
+
+  // Default sizes (must match buildTeacherDashboard's tileDefs)
+  var defs = {tview:{c:2,r:2}, tgrp:{c:2,r:2}, tpush:{c:2,r:2}, talink:{c:2,r:2}, tembed:{c:4,r:2}, trem:{c:2,r:2}};
+  var cur  = Object.assign({}, defs[id] || {c:2,r:2}, (prefs.teacherTileSizes && prefs.teacherTileSizes[id]) || {});
+
+  // Build popup
+  var pop = document.createElement('div');
+  pop.id = 'sz-pop';
+  pop.dataset.wid = id;
+  pop.className = 'sz-pop';
+  var html = '<div class="sz-pop-title">Size (cols \u00d7 rows)</div><div class="sz-grid">';
+  for (var r = 1; r <= 2; r++){
+    for (var c = 1; c <= 4; c++){
+      var isSel = (c === cur.c && r === cur.r) ? ' sel' : '';
+      html += '<div class="sz-cell' + isSel + '" onclick="pickTSz(\'' + id + '\',' + c + ',' + r + ')">' + c + '\u00d7' + r + '</div>';
+    }
+  }
+  html += '</div>';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+
+  // Position popup near the tile's gear, clamped to viewport
+  var tile  = document.getElementById('tile-' + id);
+  var tRect = tile ? tile.getBoundingClientRect() : {top:100, bottom:300, left:100, right:400};
+  var popW = 215, popH = 152;
+  var left = tRect.right - popW - 14;
+  var top  = tRect.bottom - popH - 44;
+  if (left < tRect.left + 8) left = tRect.left + 8;
+  if (top  < tRect.top  + 8) top  = tRect.top  + 8;
+  if (left + popW > window.innerWidth  - 8) left = window.innerWidth  - popW - 8;
+  if (top  + popH > window.innerHeight - 8) top  = window.innerHeight - popH - 8;
+  if (left < 8) left = 8;
+  if (top  < 8) top  = 8;
+  pop.style.top  = top  + 'px';
+  pop.style.left = left + 'px';
+
+  // Click-outside-to-close
+  setTimeout(function(){
+    function away(e){ if (!pop.contains(e.target)){ pop.remove(); document.removeEventListener('click', away); } }
+    document.addEventListener('click', away);
+  }, 10);
+}
+
+// Apply a picked size to the tile + persist to prefs.
+function pickTSz(id, cols, rows){
+  if (!prefs.teacherTileSizes) prefs.teacherTileSizes = {};
+  prefs.teacherTileSizes[id] = {c:cols, r:rows};
+
+  var tile = document.getElementById('tile-' + id);
+  if (tile){
+    var minH = (rows * 180) + ((rows - 1) * 14);
+    tile.style.gridColumn = 'span ' + cols;
+    tile.style.gridRow    = 'span ' + rows;
+    tile.style.minHeight  = minH + 'px';
+  }
+
+  var pop = document.getElementById('sz-pop');
+  if (pop) pop.remove();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. WIDGET RENDERERS
+   Each function paints the static HTML shell for its widget body, then
+   triggers loads/sub-renderers as needed. Run from buildTeacherDashboard's
+   setTimeout so the grid is already on screen.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// View Student widget — student dropdown + inline planner viewer.
+// Falls back to a separate getMyStudents call if the global `students`
+// list isn't populated (e.g. loadStuGroups hadn't loaded yet).
+function renderTViewWidget(){
+  var el = document.getElementById('tw-tview');
+  if (!el) return;
+
+  var stuList = (typeof students !== 'undefined' && students) ? students : [];
+  if (!stuList.length){
+    el.innerHTML = '<div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading students...</div>';
+    google.script.run.withSuccessHandler(function(r){
+      if (r && r.students){ students = r.students; renderTViewWidget(); }
+      else { el.innerHTML = '<div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">No students yet.</div>'; }
+    }).getMyStudents();
+    return;
+  }
+
+  // Render dropdown + content area; auto-load the first student
+  var sO = stuList.map(function(s){
+    return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>';
+  }).join('');
+  el.innerHTML = '<select class="fsel" id="tvw-sel" onchange="loadTViewInline()" style="margin-bottom:10px;">' + sO + '</select>'
+    + '<div id="tvw-content"><div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Pick a student to view their planner data.</div></div>';
+  document.getElementById('tvw-sel').value = stuList[0].email;
+  loadTViewInline();
+}
+
+// Groups widget — counts header + list of groups with edit/delete buttons.
+function renderTGroupsWidget(){
+  var el = document.getElementById('tw-tgrp');
+  if (!el) return;
+
+  var studentCount = students.length;
+  var groupRows = groups.map(function(g){
+    return '<div style="background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:8px;padding:7px 10px;margin-bottom:5px;display:flex;align-items:center;gap:8px;">'
+      + '<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(g.name) + '</div>'
+      + '<div style="font-size:10px;color:var(--tx4);">' + g.emails.length + ' student' + (g.emails.length !== 1 ? 's' : '') + '</div></div>'
+      + '<button class="btn btn-ghost btn-sm" onclick="openGrpModal(\'' + esc(g.name) + '\')" title="Edit"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-edit"/></svg></button>'
+      + '<button class="btn btn-danger btn-sm" onclick="doDelGroup(\'' + esc(g.name) + '\');setTimeout(renderTGroupsWidget,200);"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
+      + '</div>';
+  }).join('') || '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No groups yet.</div>';
+
+  el.innerHTML = '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">'
+    +   '<div style="flex:1;font-size:11px;color:var(--tx3);"><strong style="color:var(--tx);">' + studentCount + '</strong> student' + (studentCount !== 1 ? 's' : '') + ' &middot; <strong style="color:var(--tx);">' + groups.length + '</strong> group' + (groups.length !== 1 ? 's' : '') + '</div>'
+    +   '<button class="btn btn-primary btn-sm" onclick="openGrpModal();setTimeout(renderTGroupsWidget,200);">New Group</button>'
+    + '</div>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Groups</div>'
+    + groupRows;
+}
+
+// Push Tasks widget — title/subject/priority/date/notes form + target picker.
+// NOTE: button onclick references twDoPush() which is not defined in this
+// file. Pre-existing issue — preserved verbatim per refactor rules.
+function renderTPushWidget(){
+  var el = document.getElementById('tw-tpush');
+  if (!el) return;
+  _twPushTarget = 'all';
+
+  el.innerHTML = '<input class="finp" id="tp-tt" placeholder="—Task Title *—" style="margin-bottom:6px;">'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px;">'
+    +   '<input class="finp" id="tp-ts" placeholder="—Subject—">'
+    +   '<select class="fsel" id="tp-tp"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select>'
+    + '</div>'
+    + '<input type="date" class="finp" id="tp-td" style="margin-bottom:6px;">'
+    + '<textarea class="fta" id="tp-tn" placeholder="—Notes (optional)—" style="min-height:48px;font-size:12px;margin-bottom:8px;"></textarea>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Send To</div>'
+    + '<div class="target-row">'
+    +   '<div class="topt sel" id="twp-all"   onclick="twSetPT(\'all\')">All</div>'
+    +   '<div class="topt"     id="twp-group" onclick="twSetPT(\'group\')">Group</div>'
+    +   '<div class="topt"     id="twp-ind"   onclick="twSetPT(\'individual\')">One</div>'
+    + '</div>'
+    + '<div id="twp-det" style="margin-bottom:8px;"></div>'
+    + '<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:12px;color:var(--tx2);"><input type="checkbox" id="tp-cal" style="accent-color:var(--a1);width:15px;height:15px;">Also create a calendar event (students invited)</label>'
+    + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="twMaybeOpenCal();twDoPush();">Push Task to Students</button>';
+  twRenderPTDet();
+}
+
+// Assign Links widget — tabbed (Add | Current Links).
+function renderTLinkWidget(){
+  var el = document.getElementById('tw-talink');
+  if (!el) return;
+
+  var tabBar = '<div class="t-mini-tabs">'
+    + '<button class="t-mini-tab ' + (_twLinkTab === 'add'  ? 'active' : '') + '" onclick="twLinkTab(\'add\')">Add</button>'
+    + '<button class="t-mini-tab ' + (_twLinkTab === 'list' ? 'active' : '') + '" onclick="twLinkTab(\'list\')">Current Links</button>'
+    + '</div>';
+
+  // List tab — load and render current links
+  if (_twLinkTab === 'list'){
+    el.innerHTML = tabBar + '<div id="twl-list"><div style="color:var(--tx3);font-size:12px;padding:12px;text-align:center;">Loading...</div></div>';
+    twLoadLinkList();
+    return;
+  }
+
+  // Add tab — form
+  _twLinkTarget = 'all';
+  el.innerHTML = tabBar
+    + '<input class="finp" id="twl-label" placeholder="—Label *—" style="margin-bottom:6px;">'
+    + '<input class="finp" id="twl-url"   placeholder="—URL *—"   style="margin-bottom:6px;">'
+    + '<input class="finp" id="twl-icon"  placeholder="—Icon URL (optional)—" style="margin-bottom:8px;">'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Assign To</div>'
+    + '<div class="target-row">'
+    +   '<div class="topt sel" id="twla-all"   onclick="twLinkSetTarget(\'all\')">All</div>'
+    +   '<div class="topt"     id="twla-group" onclick="twLinkSetTarget(\'group\')">Group</div>'
+    +   '<div class="topt"     id="twla-ind"   onclick="twLinkSetTarget(\'individual\')">One</div>'
+    + '</div>'
+    + '<div id="twla-det" style="margin-bottom:8px;"></div>'
+    + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="twLinkAssign()">Assign Link</button>';
+  twLinkRenderDet();
+}
+
+// Embed Documents widget — tabbed (Embed New | Current Docs). Includes
+// a "Just Me" target so a teacher can embed a doc on their own planner.
+function renderTEmbedWidget(){
+  var el = document.getElementById('tw-tembed');
+  if (!el) return;
+
+  var tabBar = '<div class="t-mini-tabs">'
+    + '<button class="t-mini-tab ' + (_twEdTab === 'add'  ? 'active' : '') + '" onclick="twEdTab(\'add\')">Embed New</button>'
+    + '<button class="t-mini-tab ' + (_twEdTab === 'list' ? 'active' : '') + '" onclick="twEdTab(\'list\')">Current Docs</button>'
+    + '</div>';
+
+  // List tab — load and render embedded docs
+  if (_twEdTab === 'list'){
+    el.innerHTML = tabBar + '<div id="twed-list"><div style="color:var(--tx3);font-size:12px;padding:12px;text-align:center;">Loading...</div></div>';
+    twEdLoadList();
+    return;
+  }
+
+  // Add tab — form
+  _twEdTarget = 'all';
+  el.innerHTML = tabBar
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;">'
+    +   '<input class="finp" id="twed-title" placeholder="—Title *—">'
+    +   '<input class="finp" id="twed-url"   placeholder="—Google URL *—" oninput="twEdDetect()">'
+    + '</div>'
+    + '<div id="twed-type-badge" style="margin-bottom:8px;font-size:11px;color:var(--a2);min-height:14px;"></div>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Assign To</div>'
+    + '<div class="target-row">'
+    +   '<div class="topt sel" id="tweda-all"   onclick="twEdSetTarget(\'all\')">All</div>'
+    +   '<div class="topt"     id="tweda-group" onclick="twEdSetTarget(\'group\')">Group</div>'
+    +   '<div class="topt"     id="tweda-ind"   onclick="twEdSetTarget(\'individual\')">One</div>'
+    +   '<div class="topt"     id="tweda-self"  onclick="twEdSetTarget(\'self\')">Just Me</div>'
+    + '</div>'
+    + '<div id="tweda-det" style="margin-bottom:8px;"></div>'
+    + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="twEdCreate()">Embed Document</button>';
+  twEdRenderDet();
+}
+
+// Send Reminder widget — title/body/datetime + target picker. Empty time = send now.
+function renderTReminderWidget(){
+  var el = document.getElementById('tw-trem');
+  if (!el) return;
+  _twRemTarget = 'all';
+
+  el.innerHTML = '<input class="finp" id="trem-title" placeholder="\u2014Reminder title *\u2014" style="margin-bottom:6px;" maxlength="100">'
+    + '<textarea class="fta" id="trem-body" placeholder="\u2014Details (optional)\u2014" style="min-height:50px;font-size:12px;margin-bottom:6px;" maxlength="300"></textarea>'
+    + '<input type="datetime-local" class="finp" id="trem-when" style="margin-bottom:8px;" placeholder="When?">'
+    + '<div style="font-size:10px;color:var(--tx4);margin-bottom:8px;">Leave time blank to send now</div>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Send To</div>'
+    + '<div class="target-row">'
+    +   '<div class="topt sel" id="trem-all"   onclick="twRemSetTarget(\'all\')">All</div>'
+    +   '<div class="topt"     id="trem-group" onclick="twRemSetTarget(\'group\')">Group</div>'
+    +   '<div class="topt"     id="trem-ind"   onclick="twRemSetTarget(\'individual\')">One</div>'
+    + '</div>'
+    + '<div id="trem-det" style="margin-bottom:8px;"></div>'
+    + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="twSendReminder()">Send Reminder</button>';
+  twRemRenderDet();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. VIEW STUDENT WIDGET — handlers
+   Loads a student's planner data, renders task list with per-list filter
+   tabs, supports inline add/delete of tasks.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Fetch the selected student's planner data and render it inside #tvw-content.
+// Renders task counts (pending/done), an Add task button, optional task-list
+// tab bar (only if the student has more than one list), and the first 8 tasks.
+function loadTViewInline(){
+  var sel = document.getElementById('tvw-sel');
+  if (!sel || !sel.value) return;
+  var email   = sel.value;
+  var content = document.getElementById('tvw-content');
+  content.innerHTML = '<div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading...</div>';
+
+  google.script.run.withSuccessHandler(function(r){
+    if (!r.success){ content.innerHTML = '<div style="color:#ef4444;font-size:12px;">' + esc(r.error || 'Error') + '</div>'; return; }
+
+    // Resolve student name (for the Add Task button label)
+    var name = '';
+    for (var i = 0; i < students.length; i++){ if (students[i].email === email) name = students[i].name; }
+
+    var allTasks = r.tasks || [];
+    var lists    = r.taskLists || [{id:'default', name:'All Tasks', color:'#6366f1'}];
+    var listMap  = r.taskListMap || {};
+
+    // If the student deleted the list we were filtering by, fall back to default
+    if (!lists.some(function(l){ return l.id === _tvwActiveList; })) _tvwActiveList = 'default';
+
+    // Filter tasks to currently-selected list. The 'default' list shows everything.
+    var filteredTasks = allTasks.filter(function(t){ return _tvwActiveList === 'default' || listMap[t.id] === _tvwActiveList; });
+    var pending = filteredTasks.filter(function(t){ return t.status !== 'completed'; });
+    var done    = filteredTasks.filter(function(t){ return t.status === 'completed'; });
+
+    // Tab bar — only render if the student has 2+ task lists
+    var tabBar = '';
+    if (lists.length > 1){
+      tabBar = '<div style="display:flex;gap:3px;margin-bottom:8px;flex-wrap:wrap;">' + lists.map(function(l){
+        var count  = allTasks.filter(function(t){ return l.id === 'default' || listMap[t.id] === l.id; }).length;
+        var active = l.id === _tvwActiveList;
+        return '<button class="t-mini-tab' + (active ? ' active' : '') + '" style="' + (active ? 'background:' + l.color + '20;color:' + l.color + ';' : '') + '" onclick="tvwSwitchList(\'' + l.id + '\')">'
+          + '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + l.color + ';margin-right:5px;vertical-align:1px;"></span>'
+          + esc(l.name) + ' <span style="opacity:.6;font-weight:500;">(' + count + ')</span></button>';
+      }).join('') + '</div>';
+    }
+
+    // Task rows (first 8) — completed tasks render struck through + faded
+    var taskRows = filteredTasks.slice(0, 8).map(function(t){
+      return '<div style="display:flex;align-items:center;gap:7px;padding:5px 8px;background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:7px;margin-bottom:4px;font-size:12px;' + (t.status === 'completed' ? 'opacity:.45;' : '') + '">'
+        + '<div class="dot ' + t.priority + '"></div>'
+        + '<span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' + (t.status === 'completed' ? 'text-decoration:line-through;' : '') + '">' + esc(t.title) + '</span>'
+        + (t.dueDate ? '<span style="font-size:10px;color:var(--tx4);">' + fmtDate(t.dueDate) + '</span>' : '')
+        + '<button class="btn btn-danger btn-sm" onclick="tDelTaskInline(\'' + t.id + '\')" style="padding:2px 6px;"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
+        + '</div>';
+    }).join('') || '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No tasks in this list</div>';
+
+    content.innerHTML = ''
+      + '<div style="display:flex;gap:6px;margin-bottom:8px;font-size:11px;">'
+      +   '<div style="background:var(--a5);border:1px solid var(--a4);color:var(--a2);border-radius:6px;padding:3px 8px;font-weight:600;">' + pending.length + ' pending</div>'
+      +   '<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);color:#22c55e;border-radius:6px;padding:3px 8px;font-weight:600;">' + done.length + ' done</div>'
+      +   '<button class="btn btn-primary btn-sm" style="margin-left:auto;font-size:11px;" onclick="openTAddInline(\'' + esc(email) + '\',\'' + esc(name) + '\')">Add task</button>'
+      + '</div>'
+      + tabBar
+      + taskRows
+      + (filteredTasks.length > 8 ? '<div style="text-align:center;font-size:11px;color:var(--tx4);margin-top:6px;">+' + (filteredTasks.length - 8) + ' more</div>' : '');
+  }).getStudentPlannerData(email);
+}
+
+// Switch the task-list filter in the View Student widget and re-render.
+function tvwSwitchList(id){
+  _tvwActiveList = id;
+  loadTViewInline();
+}
+
+// Replace the View Student content with an inline Add Task form.
+// Cancel re-runs loadTViewInline; Add submits to teacherAddTaskToStudent.
+function openTAddInline(email, name){
+  var content = document.getElementById('tvw-content');
+  content.innerHTML = '<div style="font-size:10px;font-weight:700;color:var(--a2);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Add task for ' + esc(name) + '</div>'
+    + '<input class="finp" id="ta-tt" placeholder="—Title—" style="margin-bottom:6px;">'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px;">'
+    +   '<input class="finp" id="ta-ts" placeholder="—Subject—">'
+    +   '<select class="fsel" id="ta-tp"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select>'
+    + '</div>'
+    + '<input type="date" class="finp" id="ta-td" style="margin-bottom:6px;">'
+    + '<textarea class="fta" id="ta-tn" placeholder="—Notes—" style="min-height:44px;font-size:12px;margin-bottom:8px;"></textarea>'
+    + '<div style="display:flex;gap:5px;justify-content:flex-end;">'
+    +   '<button class="btn btn-ghost   btn-sm" onclick="loadTViewInline()">Cancel</button>'
+    +   '<button class="btn btn-primary btn-sm" onclick="doTAddInline(\'' + esc(email) + '\')">Add</button>'
+    + '</div>';
+  document.getElementById('ta-tt').focus();
+}
+
+// Submit the inline add-task form. Reloads the viewer on success.
+function doTAddInline(email){
+  var title = (document.getElementById('ta-tt').value || '').trim();
+  if (!title){ toast('Enter a title', 'err'); return; }
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ loadTViewInline(); toast('Task added', 'ok'); }
+  }).teacherAddTaskToStudent(
+    email,
+    title,
+    document.getElementById('ta-ts').value.trim(),
+    document.getElementById('ta-td').value,
+    document.getElementById('ta-tp').value,
+    document.getElementById('ta-tn').value.trim()
+  );
+}
+
+// Delete a task from a student's list (server-side) and reload the viewer.
+function tDelTaskInline(id){
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ loadTViewInline(); toast('Deleted', 'inf'); }
+  }).teacherDeleteTask(id);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. PUSH TASKS WIDGET — handlers
+   Target picker (all/group/individual) + optional "also create calendar
+   event" checkbox. Calendar invitations include the resolved guest list.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// If the "also create calendar event" checkbox is checked, gather the
+// task fields + resolved guest list and open the calendar event editor.
+// Called BEFORE the push itself fires.
+function twMaybeOpenCal(){
+  var cb = document.getElementById('tp-cal');
+  if (!cb || !cb.checked) return;
+
+  var title = ((document.getElementById('tp-tt') || {}).value || '').trim();
+  if (!title) return;
+  var due   = (document.getElementById('tp-td') || {}).value || '';
+  var notes = ((document.getElementById('tp-tn') || {}).value || '').trim();
+  var subj  = ((document.getElementById('tp-ts') || {}).value || '').trim();
+
+  // Resolve guest list from the current target choice
+  var guests = [];
+  if (_twPushTarget === 'all'){
+    guests = students.map(function(s){ return s.email; });
+  } else if (_twPushTarget === 'group'){
+    var gs    = document.getElementById('twp-gs');
+    var gname = gs ? gs.value : '';
+    var grp   = groups.filter(function(g){ return g.name === gname; })[0];
+    if (grp) guests = grp.emails || [];
+  } else if (_twPushTarget === 'individual'){
+    var ss = document.getElementById('twp-ss');
+    if (ss && ss.value) guests = [ss.value];
+  }
+
+  // If subject matches one of teacher's own classes, auto-fill class times
+  var classTimes = findClassTimesForSubject(subj, due);
+  openCalendarEvent(title, due, notes, guests, classTimes);
+}
+
+// Set the Push Tasks target and update the visual selected state + detail row.
+function twSetPT(t){
+  _twPushTarget = t;
+  ['all','group','ind'].forEach(function(x){
+    var el = document.getElementById('twp-' + x);
+    if (el) el.classList.remove('sel');
+  });
+  // 'individual' uses element id 'ind' for compactness
+  var key = t === 'individual' ? 'ind' : t;
+  var el = document.getElementById('twp-' + key);
+  if (el) el.classList.add('sel');
+  twRenderPTDet();
+}
+
+// Render the per-target detail UI: count text for "all", group dropdown
+// for "group", student dropdown for "individual".
+function twRenderPTDet(){
+  var el = document.getElementById('twp-det');
+  if (!el) return;
+
+  if (_twPushTarget === 'all'){
+    el.innerHTML = '<div style="font-size:11px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;">Sends to all ' + students.length + ' student(s)</div>';
+    return;
+  }
+  if (_twPushTarget === 'group'){
+    var gO = groups.map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + ' (' + g.emails.length + ')</option>'; }).join('');
+    el.innerHTML = gO ? '<select class="fsel" id="twp-gs">' + gO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No groups yet.</div>';
+    return;
+  }
+  // individual
+  var sO = students.map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>'; }).join('');
+  el.innerHTML = sO ? '<select class="fsel" id="twp-ss">' + sO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No students yet.</div>';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. ASSIGN LINKS WIDGET — handlers
+   Tabbed: Add (form to assign a new link) / Current Links (list with delete).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Switch the Assign Links widget tab and re-render.
+function twLinkTab(t){
+  _twLinkTab = t;
+  renderTLinkWidget();
+}
+
+// Set the Assign Links target and update the visual selected state.
+function twLinkSetTarget(t){
+  _twLinkTarget = t;
+  ['all','group','ind'].forEach(function(x){
+    var el = document.getElementById('twla-' + x);
+    if (el) el.classList.remove('sel');
+  });
+  var key = t === 'individual' ? 'ind' : t;
+  var el = document.getElementById('twla-' + key);
+  if (el) el.classList.add('sel');
+  twLinkRenderDet();
+}
+
+// Render the per-target detail UI for Assign Links.
+function twLinkRenderDet(){
+  var el = document.getElementById('twla-det');
+  if (!el) return;
+
+  if (_twLinkTarget === 'all'){
+    el.innerHTML = '<div style="font-size:11px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;">Visible to all ' + students.length + ' student(s)</div>';
+    return;
+  }
+  if (_twLinkTarget === 'group'){
+    var gO = groups.map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>'; }).join('');
+    el.innerHTML = gO ? '<select class="fsel" id="twla-gs">' + gO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No groups yet.</div>';
+    return;
+  }
+  var sO = students.map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>'; }).join('');
+  el.innerHTML = sO ? '<select class="fsel" id="twla-ss">' + sO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No students yet.</div>';
+}
+
+// Submit the assign-link form. Auto-prefixes URL with https:// if missing.
+function twLinkAssign(){
+  var label = (document.getElementById('twl-label').value || '').trim();
+  var url   = (document.getElementById('twl-url').value   || '').trim();
+  var icon  = (document.getElementById('twl-icon').value  || '').trim();
+  if (!label || !url){ toast('Label and URL required', 'err'); return; }
+  if (!url.startsWith('http')) url = 'https://' + url;
+
+  // Resolve target value (group name or student email)
+  var tv = '';
+  if (_twLinkTarget === 'group'){ var gs = document.getElementById('twla-gs'); tv = gs ? gs.value : ''; }
+  else if (_twLinkTarget === 'individual'){ var ss = document.getElementById('twla-ss'); tv = ss ? ss.value : ''; }
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Link assigned', 'ok');
+      document.getElementById('twl-label').value = '';
+      document.getElementById('twl-url').value   = '';
+      document.getElementById('twl-icon').value  = '';
+    } else toast(r.error || 'Error', 'err');
+  }).assignLinkToTarget(_twLinkTarget, tv, label, url, icon);
+}
+
+// Load and render the list of links the teacher has previously assigned.
+function twLoadLinkList(){
+  google.script.run.withSuccessHandler(function(r){
+    var el = document.getElementById('twl-list');
+    if (!el) return;
+    if (!r.success || !r.links || !r.links.length){
+      el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No links assigned yet.</div>';
+      return;
+    }
+    el.innerHTML = r.links.map(function(l){
+      // Friendly target label: "All", or the student's email-local-part if it's an individual
+      var lbl = l.assignedTo === 'all' ? 'All' : (l.assignedTo.indexOf('@') > -1 ? l.assignedTo.split('@')[0] : l.assignedTo);
+      return '<div style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:7px;padding:5px 8px;margin-bottom:4px;font-size:12px;">'
+        + '<div style="flex:1;min-width:0;"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(l.label) + '</div>'
+        + '<div style="font-size:10px;color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(lbl) + ' &middot; ' + esc(l.url) + '</div></div>'
+        + '<button class="btn btn-danger btn-sm" onclick="twRemoveLink(\'' + esc(l.id) + '\')" style="padding:2px 6px;"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
+        + '</div>';
+    }).join('');
+  }).getTeacherAssignedLinks();
+}
+
+// Remove a previously-assigned link and reload the list.
+function twRemoveLink(id){
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ twLoadLinkList(); toast('Removed', 'inf'); }
+  }).removeAssignedLink(id);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   8. EMBED DOCUMENTS WIDGET — handlers
+   Tabbed: Embed New (Google Doc/Sheet/Slide/Form URL → live tile)
+           / Current Docs (list with delete).
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Switch the Embed Documents widget tab and re-render.
+function twEdTab(t){
+  _twEdTab = t;
+  renderTEmbedWidget();
+}
+
+// Set the Embed Documents target. Has 4 options including "self" (only the
+// teacher's own planner).
+function twEdSetTarget(t){
+  _twEdTarget = t;
+  ['all','group','ind','self'].forEach(function(x){
+    var el = document.getElementById('tweda-' + x);
+    if (el) el.classList.remove('sel');
+  });
+  // 'individual' → 'ind', 'self' stays 'self'
+  var key = t === 'individual' ? 'ind' : t === 'self' ? 'self' : t;
+  var el = document.getElementById('tweda-' + key);
+  if (el) el.classList.add('sel');
+  twEdRenderDet();
+}
+
+// Render the per-target detail UI for Embed Documents.
+function twEdRenderDet(){
+  var el = document.getElementById('tweda-det');
+  if (!el) return;
+
+  if (_twEdTarget === 'all'){
+    el.innerHTML = '<div style="font-size:11px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;">Visible to all ' + students.length + ' student(s)</div>';
+    return;
+  }
+  if (_twEdTarget === 'self'){
+    el.innerHTML = '<div style="font-size:11px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;">Only on your own planner</div>';
+    return;
+  }
+  if (_twEdTarget === 'group'){
+    var gO = groups.map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>'; }).join('');
+    el.innerHTML = gO ? '<select class="fsel" id="tweda-gs">' + gO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No groups yet.</div>';
+    return;
+  }
+  var sO = students.map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>'; }).join('');
+  el.innerHTML = sO ? '<select class="fsel" id="tweda-ss">' + sO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No students yet.</div>';
+}
+
+// Live URL detection — show a "Google Doc detected" / "Google Sheet detected"
+// badge below the URL input as the user types. Uses detectDocType (other chunk).
+function twEdDetect(){
+  var url   = (document.getElementById('twed-url').value || '').trim();
+  var badge = document.getElementById('twed-type-badge');
+  if (!badge) return;
+  var type = detectDocType(url);
+  var labels = {doc:'Google Doc detected', sheet:'Google Sheet detected', slides:'Google Slides detected', form:'Google Form detected'};
+  badge.textContent = url ? (labels[type] || 'Document') : '';
+}
+
+// Submit the embed form. Uses CU.email when target is 'self'.
+function twEdCreate(){
+  var title = (document.getElementById('twed-title').value || '').trim();
+  var url   = (document.getElementById('twed-url').value   || '').trim();
+  if (!title || !url){ toast('Title and URL required', 'err'); return; }
+
+  var docType = detectDocType(url);
+
+  // Resolve target value — group name, student email, or self (CU.email)
+  var tv = '';
+  if (_twEdTarget === 'group'){ var gs = document.getElementById('tweda-gs'); tv = gs ? gs.value : ''; }
+  else if (_twEdTarget === 'individual'){ var ss = document.getElementById('tweda-ss'); tv = ss ? ss.value : ''; }
+  else if (_twEdTarget === 'self') tv = CU.email;
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Embedded', 'ok');
+      document.getElementById('twed-title').value = '';
+      document.getElementById('twed-url').value   = '';
+      document.getElementById('twed-type-badge').textContent = '';
+    } else toast(r.error || 'Error', 'err');
+  }).createEmbeddedDoc(title, url, docType, _twEdTarget, tv);
+}
+
+// Load and render the list of currently embedded documents.
+function twEdLoadList(){
+  google.script.run.withSuccessHandler(function(r){
+    var el = document.getElementById('twed-list');
+    if (!el) return;
+    if (!r.success || !r.docs || !r.docs.length){
+      el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No embedded documents yet.</div>';
+      return;
+    }
+    el.innerHTML = r.docs.map(function(d){
+      var lbl = d.assignedTo === 'all' ? 'All' : (d.assignedTo.indexOf('@') > -1 ? d.assignedTo.split('@')[0] : d.assignedTo);
+      return '<div style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:7px;padding:5px 8px;margin-bottom:4px;font-size:12px;">'
+        + '<div style="flex:1;min-width:0;"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(d.title) + '</div>'
+        + '<div style="font-size:10px;color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(d.docType) + ' &middot; ' + esc(lbl) + '</div></div>'
+        + '<button class="btn btn-danger btn-sm" onclick="twEdDel(\'' + esc(d.id) + '\')" style="padding:2px 6px;"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
+        + '</div>';
+    }).join('');
+  }).getTeacherEmbeddedDocs();
+}
+
+// Delete an embedded doc and reload the list.
+function twEdDel(id){
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ twEdLoadList(); toast('Removed', 'inf'); }
+  }).deleteEmbeddedDoc(id);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. SEND REMINDER WIDGET — handlers
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Set the Send Reminder target and update the visual selected state.
+function twRemSetTarget(t){
+  _twRemTarget = t;
+  ['all','group','ind'].forEach(function(x){
+    var el = document.getElementById('trem-' + x);
+    if (el) el.classList.remove('sel');
+  });
+  var key = t === 'individual' ? 'ind' : t;
+  var el = document.getElementById('trem-' + key);
+  if (el) el.classList.add('sel');
+  twRemRenderDet();
+}
+
+// Render the per-target detail UI for Send Reminder.
+function twRemRenderDet(){
+  var el = document.getElementById('trem-det');
+  if (!el) return;
+
+  if (_twRemTarget === 'all'){
+    el.innerHTML = '<div style="font-size:11px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;">Sends to all ' + students.length + ' student(s)</div>';
+    return;
+  }
+  if (_twRemTarget === 'group'){
+    var gO = groups.map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + ' (' + g.emails.length + ')</option>'; }).join('');
+    el.innerHTML = gO ? '<select class="fsel" id="trem-gs">' + gO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No groups yet.</div>';
+    return;
+  }
+  var sO = students.map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>'; }).join('');
+  el.innerHTML = sO ? '<select class="fsel" id="trem-ss">' + sO + '</select>' : '<div style="color:var(--tx3);font-size:11px;">No students yet.</div>';
+}
+
+// Submit the reminder form. Empty datetime means "send now".
+// Calls server's pushReminder; clears form fields on success.
+function twSendReminder(){
+  var title = (document.getElementById('trem-title') || {}).value || '';
+  var body  = (document.getElementById('trem-body')  || {}).value || '';
+  var when  = (document.getElementById('trem-when')  || {}).value || '';
+  if (!title.trim()){ toast('Title required', 'err'); return; }
+
+  // Resolve target value
+  var tv = '';
+  if (_twRemTarget === 'group'){ var gs = document.getElementById('trem-gs'); tv = gs ? gs.value : ''; }
+  else if (_twRemTarget === 'individual'){ var ss = document.getElementById('trem-ss'); tv = ss ? ss.value : ''; }
+
+  // Empty string ISO means immediate send
+  var triggerISO = when ? new Date(when).toISOString() : '';
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){
+      toast('Reminder sent', 'ok');
+      document.getElementById('trem-title').value = '';
+      document.getElementById('trem-body').value  = '';
+      document.getElementById('trem-when').value  = '';
+    } else toast((r && r.error) || 'Error', 'err');
+  }).pushReminder(_twRemTarget, tv, title.trim(), body.trim(), triggerISO, '');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   10. GROUPS MODAL
+   Used by the Groups widget. Modal IDs (group-modal, m-gn, gm-title,
+   grp-list) are defined in Index.html's modal section.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Open the group editor modal. Pass a name to edit, omit to create new.
+// Renders a checkbox per student, pre-checked if already in the group.
+function openGrpModal(editName){
+  // Find the existing group (if editing)
+  var ex = editName ? (function(){
+    for (var i = 0; i < groups.length; i++){
+      if (groups[i].name === editName) return groups[i];
+    }
+    return {};
+  })() : {};
+  var emails = ex.emails || [];
+
+  document.getElementById('m-gn').value    = editName || '';
+  document.getElementById('m-gn').disabled = !!editName; // can't rename existing groups
+  document.getElementById('gm-title').textContent = editName ? 'Edit "' + editName + '"' : 'New Group';
+
+  document.getElementById('grp-list').innerHTML = students.map(function(s){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer;background:var(--bg3);border:1px solid var(--border);">'
+      + '<input type="checkbox" value="' + esc(s.email) + '" ' + (emails.indexOf(s.email) > -1 ? 'checked' : '') + ' >'
+      + '<span style="font-size:13px;font-weight:500;">' + esc(s.name) + '</span>'
+      + '<span style="font-size:11px;color:var(--tx4);">' + esc(s.email) + '</span>'
+      + '</label>';
+  }).join('') || '<div style="color:var(--tx4);">No students yet.</div>';
+
+  openModal('group-modal');
+}
+
+// Save the group from the modal (creates or updates) and refresh.
+function doSaveGroup(){
+  var name = document.getElementById('m-gn').value.trim();
+  if (!name){ toast('Enter a name', 'err'); return; }
+
+  var checked = Array.from(document.querySelectorAll('#grp-list input:checked')).map(function(i){ return i.value; });
+  closeModal('group-modal');
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Group saved', 'ok');
+      // Force re-fetch on next render so new group shows up everywhere
+      students = []; groups = [];
+      buildGroupsPage();
+    }
+  }).saveGroup(name, JSON.stringify(checked));
+}
+
+// Confirm and delete a group, then refresh.
+function doDelGroup(name){
+  if (!confirm('Delete group "' + name + '"?')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Deleted', 'inf');
+      students = []; groups = [];
+      buildGroupsPage();
+    }
+  }).deleteGroup(name);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   11. LEGACY PUSH PAGE
+   Older standalone push UI using element IDs `to-*` / `pt-det` / `p-tt`
+   etc. These are NOT used by the modern Push Tasks widget (which uses
+   `twp-*` / `tp-*`). Kept verbatim per refactor rules — likely dead code
+   but flagging here so a future pass can verify and remove.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Legacy: set push target on the older standalone push page.
+function setPT(t){
+  pushTarget = t;
+  ['all','group','ind'].forEach(function(x){
+    var b = document.getElementById('to-' + x);
+    if (b) b.classList.remove('sel');
+  });
+  var k = t === 'individual' ? 'ind' : t;
+  var b = document.getElementById('to-' + k);
+  if (b) b.classList.add('sel');
+
+  var g = groups.map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + ' (' + g.emails.length + ')</option>'; }).join('');
+  var s = students.map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name) + '</option>'; }).join('');
+  renderPTDet(g, s);
+}
+
+// Legacy: render push target detail row (group/student dropdown).
+function renderPTDet(g, s){
+  var el = document.getElementById('pt-det');
+  if (!el) return;
+  if (pushTarget === 'all') el.innerHTML = '<div style="font-size:12px;color:var(--tx3);background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:9px 12px;">Sends to all ' + students.length + ' registered student(s)</div>';
+  else if (pushTarget === 'group') el.innerHTML = g ? '<select class="fsel" id="p-gs">' + g + '</select>' : '<div style="color:var(--tx3);font-size:12px;">No groups yet.</div>';
+  else el.innerHTML = s ? '<select class="fsel" id="p-ss">' + s + '</select>' : '<div style="color:var(--tx3);font-size:12px;">No students yet.</div>';
+}
+
+// Legacy: submit the older push form via pushAssignment.
+function doPush(){
+  var title = document.getElementById('p-tt').value.trim();
+  if (!title){ toast('Enter a title', 'err'); return; }
+
+  var tv = '';
+  if (pushTarget === 'group'){
+    var sg = document.getElementById('p-gs');
+    tv = sg ? sg.value : '';
+    if (!tv){ toast('Select a group', 'err'); return; }
+  }
+  if (pushTarget === 'individual'){
+    var ss = document.getElementById('p-ss');
+    tv = ss ? ss.value : '';
+    if (!tv){ toast('Select a student', 'err'); return; }
+  }
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Pushed to ' + r.count + ' student(s)!', 'ok');
+      document.getElementById('p-tt').value = '';
+      document.getElementById('p-tn').value = '';
+      document.getElementById('p-td').value = '';
+    } else toast(r.error || 'Error', 'err');
+  }).pushAssignment(
+    document.getElementById('p-tt').value.trim(),
+    document.getElementById('p-ts').value.trim(),
+    document.getElementById('p-td').value,
+    document.getElementById('p-tp').value,
+    document.getElementById('p-tn').value.trim(),
+    pushTarget,
+    tv
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   12. HELPERS
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Pre-fetch students + groups for the teacher tab. Skips the round-trip
+// if either global is already populated. Falls back to two sequential
+// calls if the combined endpoint fails.
+function loadStuGroups(cb){
+  if (students.length || groups.length){ cb(); return; }
+
+  google.script.run.withSuccessHandler(function(r){
+    students = (r && r.students) || [];
+    groups   = (r && r.groups)   || [];
+    cb();
+  }).withFailureHandler(function(){
+    // Fallback path: two separate calls
+    google.script.run.withSuccessHandler(function(sl){
+      students = sl || [];
+      google.script.run.withSuccessHandler(function(gl){
+        groups = gl || [];
+        cb();
+      }).getGroups();
+    }).getStudentList();
+  }).getStuGroupData();
+}
+
+</script>

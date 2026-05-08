@@ -1,0 +1,879 @@
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ║  index_calendar.html — CALENDAR TAB CHUNK
+   ║  ────────────────────────────────────────
+   ║  Owns the Calendar tab: month/week/agenda views with a side rail
+   ║  showing overdue tasks, today's tasks, upcoming tasks, events,
+   ║  and a calendar visibility toggle list.
+   ║
+   ║  Data sources:
+   ║    - Tasks come from the global `myTasks` array (loaded elsewhere).
+   ║    - Events come from getCalendarPageData (Google Calendar API).
+   ║    - Event completion status is per-user, stored server-side
+   ║      via setEventStatus / getMyEventStatuses.
+   ║
+   ║  Caching: events + statuses are cached for 5 min keyed on a 3-month
+   ║  fetch window. Navigating within the window hits cache.
+   ║
+   ║  TABLE OF CONTENTS
+   ║  ─────────────────
+   ║   1. STATE (mode, cursor, selected day, caches, UI flags)
+   ║   2. PAGE BUILDER (buildCalPage)
+   ║   3. VIEW SWITCHING (setCalView, highlightCalView)
+   ║   4. NAVIGATION (today, prev/next, title updater)
+   ║   5. DATE RANGE HELPERS (_calRange, _calFetchRange, _calCacheKey)
+   ║   6. DATA LOADING (showCalLoading, loadCalEvents, reloadCal)
+   ║   7. VIEW DISPATCH (renderCalView)
+   ║   8. DATA SHAPING (_itemsByDay, _itemChipHtml)
+   ║   9. VIEW RENDERERS (month, week, agenda)
+   ║  10. CELL/EVENT INTERACTIONS (cell click, add, toggles, open event)
+   ║  11. SIDE RAIL (task row helper, full rail render, accordion toggles)
+   ║  12. VISIBILITY + COMPLETION (calendar toggle, event status, hide done)
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   1. STATE
+   ═══════════════════════════════════════════════════════════════════ */
+
+var calMode         = 'month';   // current view: 'month' | 'week' | 'agenda'
+var calCursor       = null;      // anchor date for the current view (initialized on first build)
+var _calSelectedDay = null;      // YMD string of the day highlighted in the grid
+var _calEvents      = [];        // raw events from getCalendarPageData
+var _calCache       = {};        // {fetchRangeKey: {events, statuses, fetchedAt}}
+var _calCacheTTL    = 300000;    // 5 min — cache expiry
+var _calOverdueOpen = false;     // accordion: overdue section in side rail
+var _calCalsOpen    = false;     // accordion: calendars list in side rail
+var _eventStatuses  = {};        // {eventId: 'completed' | ''} — user's per-event done state
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. PAGE BUILDER
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Build the entire Calendar tab. Teachers see it under #my-cal, students under #cal.
+// Lays out toolbar + main grid + side rail + footer, then triggers data load.
+function buildCalPage(){
+  // Different panel ID for teacher vs student (they share most of the UI but live in different tabs)
+  var pid = CU.role === 'teacher' ? 'my-cal' : 'cal';
+  calMode = prefs.calMode || 'month';
+  if (!calCursor)       calCursor = new Date();
+  if (!_calSelectedDay) _calSelectedDay = _ymdLocal(new Date());
+
+  panel(pid).innerHTML =
+    '<div class="cal2-shell">' +
+      '<div class="cal2-tb">' +
+        '<div class="cal2-tb-l">' +
+          '<button class="cal2-today" onclick="calGoToday()">Today</button>' +
+          '<button class="cal2-arrow" onclick="calNav(-1)" title="Previous">&lsaquo;</button>' +
+          '<button class="cal2-arrow" onclick="calNav(1)" title="Next">&rsaquo;</button>' +
+          '<div class="cal2-title" id="cal2-title">&mdash;</div>' +
+        '</div>' +
+        '<div class="cal2-tb-r">' +
+          '<div class="cal2-vsw">' +
+            '<button class="cal2-vopt" id="cv-week"   onclick="setCalView(\'week\')">Week</button>' +
+            '<button class="cal2-vopt" id="cv-month"  onclick="setCalView(\'month\')">Month</button>' +
+            '<button class="cal2-vopt" id="cv-agenda" onclick="setCalView(\'agenda\')">Agenda</button>' +
+          '</div>' +
+          '<button class="cal2-new" onclick="calOpenAdd()">+ New</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="cal2-body">' +
+        '<div class="cal2-main">' +
+          '<div class="cal2-load" id="cal2-load"><div class="soaring-spinner"><div class="halo"></div><div class="crest"></div></div></div>' +
+          '<div id="cal2-host"></div>' +
+        '</div>' +
+        '<div class="cal2-rail" id="cal2-rail"></div>' +
+      '</div>' +
+      '<div class="cal2-foot">' +
+        '<div class="cal2-legend">' +
+          '<span class="lg"><span class="lg-dot"></span>Task / Event</span>' +
+          '<span class="lg"><span class="lg-dot ovd"></span>Overdue</span>' +
+          '<span class="lg"><span class="lg-circle"></span>Click circle to mark done</span>' +
+        '</div>' +
+        '<label class="cal2-foot-toggle"><input type="checkbox"' + (prefs.hideCompletedCal ? ' checked' : '') + ' onchange="toggleHideCompleted(this.checked)"> Hide completed</label>' +
+        '<a href="https://calendar.google.com" target="_blank" class="cal2-foot-link">Open Google Calendar &rarr;</a>' +
+      '</div>' +
+    '</div>';
+
+  highlightCalView(calMode);
+  updateCalTitle();
+  loadCalEvents(); // also calls renderCalView + renderCalRail
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. VIEW SWITCHING
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Switch the active view (month/week/agenda), persist it, and reload events.
+function setCalView(m){
+  calMode = m;
+  prefs.calMode = m;
+  highlightCalView(m);
+  updateCalTitle();
+  loadCalEvents();
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+}
+
+// Update the "sel" highlight on the view-switcher buttons.
+function highlightCalView(m){
+  ['week','month','agenda'].forEach(function(x){
+    var b = document.getElementById('cv-' + x);
+    if (b) b.classList.toggle('sel', x === m);
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. NAVIGATION
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Reset cursor to today and re-render.
+function calGoToday(){
+  calCursor = new Date();
+  _calSelectedDay = _ymdLocal(new Date());
+  updateCalTitle();
+  loadCalEvents();
+}
+
+// Navigate by ±1 unit. Unit depends on view: month=1mo, week=7d, agenda=14d.
+function calNav(dir){
+  if (!calCursor) calCursor = new Date();
+  var d = new Date(calCursor);
+  if (calMode === 'month'){
+    // setDate(1) first so going from Jan 31 → +1 month doesn't skip Feb to Mar
+    d.setDate(1);
+    d.setMonth(d.getMonth() + dir);
+  } else if (calMode === 'week'){
+    d.setDate(d.getDate() + 7 * dir);
+  } else {
+    // agenda
+    d.setDate(d.getDate() + 14 * dir);
+  }
+  calCursor = d;
+  updateCalTitle();
+  loadCalEvents();
+}
+
+// Update the toolbar title to reflect cursor + mode.
+// Month: "March 2026"
+// Week:  "Mar 8 – Mar 14, 2026"
+// Agenda:"Mar 8 – Mar 22"
+function updateCalTitle(){
+  var el = document.getElementById('cal2-title');
+  if (!el) return;
+  var d = calCursor || new Date();
+
+  if (calMode === 'month'){
+    el.textContent = MONTHS[d.getMonth()] + ' ' + d.getFullYear();
+  } else if (calMode === 'week'){
+    var r = _calRange();
+    var s = new Date(r.start);
+    var e = new Date(r.end); e.setDate(e.getDate() - 1); // range.end is exclusive; back off 1 day for display
+    el.textContent = MSHRT[s.getMonth()] + ' ' + s.getDate() + ' \u2013 ' + MSHRT[e.getMonth()] + ' ' + e.getDate() + ', ' + s.getFullYear();
+  } else {
+    var s = new Date(d); s.setHours(0, 0, 0, 0);
+    var e = new Date(s); e.setDate(e.getDate() + 14);
+    el.textContent = MSHRT[s.getMonth()] + ' ' + s.getDate() + ' \u2013 ' + MSHRT[e.getMonth()] + ' ' + e.getDate();
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. DATE RANGE HELPERS
+   _calRange = what's visible on screen.
+   _calFetchRange = the wider 3-month window we actually fetch from server.
+   _calCacheKey is keyed on the FETCH range so navigating within the
+   window hits cache instead of re-fetching.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Compute the visible range for the current view.
+// Month → 6 weeks (42 days) starting from the Sunday before the 1st.
+// Week  → Sun→Sat of the cursor's week.
+// Agenda→ 14 days starting from the cursor.
+function _calRange(){
+  var d = calCursor || new Date();
+
+  if (calMode === 'month'){
+    var first = new Date(d.getFullYear(), d.getMonth(), 1);
+    var start = new Date(first); start.setDate(first.getDate() - first.getDay());
+    var end   = new Date(start); end.setDate(start.getDate() + 42);
+    return {start: start, end: end};
+  }
+  if (calMode === 'week'){
+    var start = new Date(d); start.setDate(d.getDate() - d.getDay()); start.setHours(0, 0, 0, 0);
+    var end   = new Date(start); end.setDate(start.getDate() + 7);
+    return {start: start, end: end};
+  }
+  // agenda
+  var s = new Date(d); s.setHours(0, 0, 0, 0);
+  var e = new Date(s); e.setDate(e.getDate() + 14);
+  return {start: s, end: e};
+}
+
+// Compute the fetch window — a 3-month span around the cursor. Used only
+// for server fetches and cache keys, not for what the user sees on screen.
+function _calFetchRange(){
+  var d = calCursor || new Date();
+  var start = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  var end   = new Date(d.getFullYear(), d.getMonth() + 2, 0);
+  return {start: start, end: end};
+}
+
+// Cache key — uses the FETCH range, not the display range, so navigating
+// within a quarter hits cache instead of refetching.
+function _calCacheKey(){
+  var r = _calFetchRange();
+  return r.start.toISOString() + '|' + r.end.toISOString();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. DATA LOADING
+   loadCalEvents has three response paths:
+     - cache hit → render immediately
+     - server response includes statuses → cache + render
+     - server response missing statuses → fetch them separately, then cache
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Toggle the loading spinner overlay on the main view.
+function showCalLoading(on){
+  var el = document.getElementById('cal2-load');
+  if (el) el.classList.toggle('on', !!on);
+}
+
+// Fetch events + statuses for the current cursor's fetch window, render.
+// Uses a 5-min in-memory cache. Falls back to empty arrays on failure.
+function loadCalEvents(){
+  var range  = _calRange();
+  var key    = _calCacheKey();
+  var cached = _calCache[key];
+
+  // ── Fast path: cache hit, render directly ──
+  if (cached && (Date.now() - cached.fetchedAt) < _calCacheTTL){
+    _calEvents = cached.events;
+    _eventStatuses = cached.statuses || {};
+    renderCalView();
+    renderCalRail();
+    return;
+  }
+
+  showCalLoading(true);
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      _calEvents = (r && r.events) ? r.events : [];
+
+      // ── Path A: server returned statuses inline ──
+      if (r && r.statuses && typeof r.statuses === 'object'){
+        _eventStatuses = r.statuses;
+        _calCache[key] = {events: _calEvents, statuses: _eventStatuses, fetchedAt: Date.now()};
+        showCalLoading(false);
+        renderCalView();
+        renderCalRail();
+        return;
+      }
+
+      // ── Path B: statuses missing — fetch them in a follow-up call ──
+      if (_calEvents.length){
+        var ids = _calEvents.map(function(e){ return e.id; });
+        google.script.run
+          .withSuccessHandler(function(s){
+            showCalLoading(false);
+            // Server may return an array of {eventId, status} OR a plain map — handle both
+            var map = {};
+            if (s && typeof s === 'object'){
+              if (Array.isArray(s)){
+                s.forEach(function(row){ if (row && row.eventId) map[row.eventId] = row.status; });
+              } else {
+                map = s;
+              }
+            }
+            _eventStatuses = map;
+            _calCache[key] = {events: _calEvents, statuses: map, fetchedAt: Date.now()};
+            renderCalView();
+            renderCalRail();
+          })
+          .withFailureHandler(function(){
+            showCalLoading(false);
+            _eventStatuses = {};
+            _calCache[key] = {events: _calEvents, statuses: {}, fetchedAt: Date.now()};
+            renderCalView();
+            renderCalRail();
+          })
+          .getMyEventStatuses(JSON.stringify(ids));
+      } else {
+        // ── Path C: no events at all ──
+        showCalLoading(false);
+        _eventStatuses = {};
+        _calCache[key] = {events: [], statuses: {}, fetchedAt: Date.now()};
+        renderCalView();
+        renderCalRail();
+      }
+    })
+    .withFailureHandler(function(){
+      // Total failure — still render so user sees the empty grid instead of a stuck spinner
+      showCalLoading(false);
+      _calEvents = [];
+      _eventStatuses = {};
+      renderCalView();
+      renderCalRail();
+    })
+    .getCalendarPageData(range.start.toISOString(), range.end.toISOString(), JSON.stringify([]));
+}
+
+// Force a fresh fetch by invalidating the current cache key.
+function reloadCal(){
+  delete _calCache[_calCacheKey()];
+  loadCalEvents();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. VIEW DISPATCH
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the appropriate view based on calMode.
+function renderCalView(){
+  var host = document.getElementById('cal2-host');
+  if (!host) return;
+  if      (calMode === 'month') host.innerHTML = renderMonthHTML();
+  else if (calMode === 'week')  host.innerHTML = renderWeekHTML();
+  else                          host.innerHTML = renderAgendaHTML();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   8. DATA SHAPING
+   _itemsByDay produces a unified {date: [items]} map combining tasks
+   and events. _itemChipHtml renders an item as a colored chip in the
+   month/week grids.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Build a {YMD: [items]} map combining tasks and events.
+// Each item has a kind ('task'|'event'), a sortKey (tasks first by title,
+// then events by start time, all-day events at 0000), and color/status info.
+function _itemsByDay(){
+  var byDay         = {};
+  var todayStr      = _ymdLocal(new Date());
+  var hideCompleted = !!prefs.hideCompletedCal;
+
+  // ── Tasks ──
+  (myTasks || []).forEach(function(t){
+    if (!t.dueDate || t.status === 'deleted') return;
+    if (hideCompleted && t.status === 'completed') return;
+    if (!byDay[t.dueDate]) byDay[t.dueDate] = [];
+
+    var overdue = t.dueDate < todayStr && t.status !== 'completed';
+    byDay[t.dueDate].push({
+      kind:    'task',
+      id:      t.id,
+      title:   t.title,
+      subject: t.subject || '',
+      status:  t.status,
+      overdue: overdue,
+      color:   getSubjectColor(t.subject || ''),
+      sortKey: '0_' + t.title // tasks come before events in the day's list
+    });
+  });
+
+  // ── Calendar events (filtered by visibility prefs + completed pref) ──
+  var hiddenCals = (prefs.hiddenCalendars) || {};
+  (_calEvents || []).forEach(function(ev){
+    if (hiddenCals[ev.calendarId]) return;
+    var status = _eventStatuses[ev.id] || '';
+    if (hideCompleted && status === 'completed') return;
+
+    var s = new Date(ev.start);
+    var k = _ymdLocal(s);
+    if (!byDay[k]) byDay[k] = [];
+
+    byDay[k].push({
+      kind:      'event',
+      id:        ev.id,
+      title:     ev.title,
+      time:      ev.allDay ? '' : _fmtTimeLocal(s),
+      startTime: s.getHours() * 60 + s.getMinutes(),
+      color:     ev.calendarColor || '#6366f1',
+      htmlLink:  ev.htmlLink || '',
+      allDay:    !!ev.allDay,
+      status:    status,
+      // Events: all-day go first (0000), then by start time padded to 4 digits
+      sortKey:   '1_' + (ev.allDay ? '0000' : String(s.getHours() * 60 + s.getMinutes()).padStart(4, '0'))
+    });
+  });
+
+  // Sort each day's items by their sortKey
+  Object.keys(byDay).forEach(function(k){
+    byDay[k].sort(function(a, b){ return a.sortKey.localeCompare(b.sortKey); });
+  });
+  return byDay;
+}
+
+// Render a single item as a chip in the month/week grid.
+// Tasks: clicking the chip toggles done; clicking the checkbox also toggles done (separate click handler).
+// Events: clicking the chip opens the event in Google Calendar; checkbox toggles completion.
+function _itemChipHtml(it){
+  if (it.kind === 'task'){
+    var done = it.status === 'completed';
+    return '<div class="cal2-chip' + (done ? ' done' : '') + (it.overdue ? ' ovd' : '') + '" ' +
+      'style="background:' + it.color + '22;border-left-color:' + (it.overdue ? '#ef4444' : it.color) + ';color:' + (it.overdue ? '#ef4444' : it.color) + ';" ' +
+      'onclick="event.stopPropagation();calEditTask(\'' + it.id + '\')" ' +
+      'title="' + esc(it.title) + '">' +
+      '<span class="cal2-chk' + (done ? ' on' : '') + '" onclick="event.stopPropagation();calToggleTask(\'' + it.id + '\')"></span>' +
+      '<span class="cal2-tt" style="color:var(--tx);">' + esc(it.title) + '</span>' +
+      '</div>';
+  } else {
+    var done = it.status === 'completed';
+    return '<div class="cal2-chip ev' + (done ? ' done' : '') + '" ' +
+      'style="background:' + it.color + '22;border-left-color:' + it.color + ';color:' + it.color + ';" ' +
+      'onclick="event.stopPropagation();calOpenEvent(\'' + esc(it.id) + '\')" ' +
+      'title="' + esc(it.title) + '">' +
+      '<span class="cal2-chk' + (done ? ' on' : '') + '" onclick="event.stopPropagation();calToggleEvent(\'' + esc(it.id) + '\')"></span>' +
+      (it.time ? '<span class="cal2-time">' + esc(it.time) + '</span>' : '') +
+      '<span class="cal2-tt" style="color:var(--tx);">' + esc(it.title) + '</span>' +
+      '</div>';
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. VIEW RENDERERS — month, week, agenda
+   Each returns an HTML string that gets injected into #cal2-host.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render the 6-week month grid (42 cells).
+// Each cell shows up to 3 chips + a "+N more" expander. Clicking the
+// expander switches to agenda view at that day.
+function renderMonthHTML(){
+  var range     = _calRange();
+  var first     = new Date(calCursor.getFullYear(), calCursor.getMonth(), 1);
+  var thisMonth = first.getMonth();
+  var todayStr  = _ymdLocal(new Date());
+  var byDay     = _itemsByDay();
+  var DAYS_SHORT = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+  var head  = '<div class="cal2-mh">' + DAYS_SHORT.map(function(d){ return '<div>' + d + '</div>'; }).join('') + '</div>';
+  var cells = '';
+  var d     = new Date(range.start);
+
+  for (var i = 0; i < 42; i++){
+    var k     = _ymdLocal(d);
+    var inMo  = d.getMonth() === thisMonth; // dim out cells from prev/next month
+    var isT   = k === todayStr;
+    var isSel = k === _calSelectedDay;
+    var items = byDay[k] || [];
+
+    var maxShow = 3;
+    var shown   = items.slice(0, maxShow);
+    var more    = items.length - maxShow;
+    var chips   = shown.map(_itemChipHtml).join('');
+    if (more > 0) chips += '<div class="cal2-more" onclick="event.stopPropagation();showDayItems(\'' + k + '\')">+' + more + ' more</div>';
+
+    cells += '<div class="cal2-cell' + (inMo ? '' : ' om') + (isT ? ' today' : '') + (isSel ? ' sel' : '') + '" data-date="' + k + '" onclick="calCellClick(\'' + k + '\')">' +
+      '<div class="cal2-dn">' + d.getDate() + '</div>' + chips +
+      '</div>';
+    d.setDate(d.getDate() + 1);
+  }
+  return '<div class="cal2-mo">' + head + '<div class="cal2-mg">' + cells + '</div></div>';
+}
+
+// Render the 7-day week view as a horizontal row of day columns.
+// Empty days show "Nothing scheduled" instead of a chip list.
+function renderWeekHTML(){
+  var range    = _calRange();
+  var todayStr = _ymdLocal(new Date());
+  var byDay    = _itemsByDay();
+  var DAYS_SHORT = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+  var html = '<div class="cal2-wk">';
+  for (var i = 0; i < 7; i++){
+    var d   = new Date(range.start); d.setDate(d.getDate() + i);
+    var k   = _ymdLocal(d);
+    var isT = k === todayStr;
+    var items = byDay[k] || [];
+
+    html += '<div class="cal2-wk-day' + (isT ? ' today' : '') + '" data-date="' + k + '" onclick="calCellClick(\'' + k + '\')">' +
+      '<div class="cal2-wk-hd"><span class="cal2-wk-dow">' + DAYS_SHORT[d.getDay()] + '</span><br><span class="cal2-wk-dn' + (isT ? ' today' : '') + '">' + d.getDate() + '</span></div>' +
+      '<div class="cal2-wk-body">' +
+        (items.length ? items.map(_itemChipHtml).join('') : '<div class="cal2-wk-empty">Nothing scheduled</div>') +
+      '</div>' +
+    '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// Render the 14-day agenda view as a vertical list grouped by date.
+// Empty days are skipped entirely (unlike week view). If nothing exists
+// across the whole 14-day window, show a single "nothing scheduled" message.
+function renderAgendaHTML(){
+  var range    = _calRange();
+  var byDay    = _itemsByDay();
+  var todayStr = _ymdLocal(new Date());
+
+  // Generate the YMD keys we want to display in order
+  var keys = [];
+  var d = new Date(range.start);
+  for (var i = 0; i < 14; i++){ keys.push(_ymdLocal(d)); d.setDate(d.getDate() + 1); }
+
+  var html   = '<div class="cal2-ag">';
+  var hasAny = false;
+
+  keys.forEach(function(k){
+    var items = byDay[k] || [];
+    if (!items.length) return; // skip empty days
+    hasAny = true;
+
+    // 'T12:00:00' avoids timezone landmines when parsing a date-only string
+    var dt    = new Date(k + 'T12:00:00');
+    var isT   = k === todayStr;
+    var label = DAYS[dt.getDay()] + ', ' + MSHRT[dt.getMonth()] + ' ' + dt.getDate() + (isT ? ' (Today)' : '');
+
+    html += '<div class="cal2-ag-day">' +
+      '<div class="cal2-ag-date' + (isT ? ' today' : '') + '">' + label + '</div>' +
+      items.map(function(it){
+        if (it.kind === 'task'){
+          var done = it.status === 'completed';
+          return '<div class="cal2-ag-row' + (done ? ' done' : '') + (it.overdue ? ' ovd' : '') + '" style="border-left-color:' + it.color + ';" onclick="calEditTask(\'' + it.id + '\')">' +
+            '<span class="cal2-ag-chk' + (done ? ' on' : '') + '" style="color:' + it.color + ';" onclick="event.stopPropagation();calToggleTask(\'' + it.id + '\')"></span>' +
+            '<div class="cal2-ag-body">' +
+              '<div class="cal2-ag-title">' + esc(it.title) + '</div>' +
+              (it.subject ? '<div class="cal2-ag-meta">' + esc(it.subject) + '</div>' : '') +
+            '</div>' +
+          '</div>';
+        } else {
+          var done = it.status === 'completed';
+          return '<div class="cal2-ag-row' + (done ? ' done' : '') + '" style="border-left-color:' + it.color + ';" onclick="calOpenEvent(\'' + esc(it.id) + '\')">' +
+            '<span class="cal2-ag-chk' + (done ? ' on' : '') + '" style="color:' + it.color + ';" onclick="event.stopPropagation();calToggleEvent(\'' + esc(it.id) + '\')"></span>' +
+            '<div class="cal2-ag-body">' +
+              '<div class="cal2-ag-title">' + esc(it.title) + '</div>' +
+              '<div class="cal2-ag-meta">' + (it.time || 'All day') + ' &middot; Calendar event</div>' +
+            '</div>' +
+          '</div>';
+        }
+      }).join('') +
+      '</div>';
+  });
+
+  if (!hasAny) html += '<div class="cal2-ag-empty">Nothing scheduled in this period.</div>';
+  html += '</div>';
+  return html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   10. CELL/EVENT INTERACTIONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+// User clicked a day cell (month or week view) — update selection highlight
+// in place (no full re-render) and refresh the side rail to reflect the new day.
+function calCellClick(dateStr){
+  _calSelectedDay = dateStr;
+  document.querySelectorAll('.cal2-cell').forEach(function(c){
+    c.classList.toggle('sel', c.dataset.date === dateStr);
+  });
+  renderCalRail();
+}
+
+// User clicked "+ New" — open the task modal pre-filled with the selected
+// date. Reuses the global task-modal IDs (m-tt, m-td, m-tn, m-ts).
+function calOpenAdd(){
+  var d  = _calSelectedDay || _ymdLocal(new Date());
+  var tt = document.getElementById('m-tt');
+  var td = document.getElementById('m-td');
+  var tn = document.getElementById('m-tn');
+  if (tt) tt.value = '';
+  if (td) td.value = d;
+  if (tn) tn.value = '';
+  var ts = document.getElementById('m-ts');
+  if (ts) ts.innerHTML = buildSubjectDropdownOptions('');
+  openModal('task-modal');
+}
+
+// Toggle a task's completed state. Delegates to the shared toggleTask
+// helper, then re-renders the calendar after a brief delay (lets server
+// round-trip update myTasks first).
+function calToggleTask(taskId){
+  var task = null;
+  for (var i = 0; i < myTasks.length; i++){
+    if (myTasks[i].id === taskId){ task = myTasks[i]; break; }
+  }
+  if (!task) return;
+  toggleTask(taskId, task.status);
+  setTimeout(function(){ renderCalView(); renderCalRail(); }, 80);
+}
+
+// Click on a task chip/row — currently just toggles done. Full task
+// editing lives in the To-Do widget; this is intentional placeholder.
+function calEditTask(taskId){
+  calToggleTask(taskId);
+}
+
+// Open a calendar event in Google Calendar (new tab) using its htmlLink.
+function calOpenEvent(eventId){
+  var ev = null;
+  for (var i = 0; i < _calEvents.length; i++){
+    if (_calEvents[i].id === eventId){ ev = _calEvents[i]; break; }
+  }
+  if (ev && ev.htmlLink) window.open(ev.htmlLink, '_blank');
+}
+
+// "+N more" link in month view → switch to agenda view focused on that day.
+function showDayItems(dateStr){
+  calCursor       = new Date(dateStr + 'T12:00:00');
+  _calSelectedDay = dateStr;
+  setCalView('agenda');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   11. SIDE RAIL
+   The right-side panel showing today's tasks, overdue alerts, upcoming
+   tasks, events for the selected day, and a calendar visibility list.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Render a single task row for the side rail. Used by multiple sections.
+function _railTaskRow(t){
+  var color = getSubjectColor(t.subject || '');
+  var done  = t.status === 'completed';
+  return '<div class="cal2-rail-row' + (done ? ' done' : '') + '" onclick="calEditTask(\'' + t.id + '\')">' +
+    '<span class="cal2-rail-chk' + (done ? ' on' : '') + '" style="border-color:' + color + ';' + (done ? 'background:' + color + ';' : '') + '" onclick="event.stopPropagation();calToggleTask(\'' + t.id + '\')"></span>' +
+    '<div class="cal2-rail-body">' +
+      '<div class="cal2-rail-title">' + esc(t.title) + '</div>' +
+      '<div class="cal2-rail-meta">' + (t.subject ? esc(t.subject) + ' \u00b7 ' : '') + fmtDate(t.dueDate) + '</div>' +
+    '</div>' +
+    '</div>';
+}
+
+// Render the entire side rail. Four sections (Today header, Overdue,
+// Due-this-day, Coming-up, Events) plus a Calendars accordion at the bottom.
+function renderCalRail(){
+  var rail = document.getElementById('cal2-rail');
+  if (!rail) return;
+
+  // ── Pre-compute display values for the selected day ──
+  var todayStr      = _ymdLocal(new Date());
+  var selected      = _calSelectedDay || todayStr;
+  var sel           = new Date(selected + 'T12:00:00');
+  var dowName       = DAYS[sel.getDay()].toUpperCase();
+  var dateLabel     = MONTHS[sel.getMonth()] + ' ' + sel.getDate();
+  var isToday       = selected === todayStr;
+  var hideCompleted = !!prefs.hideCompletedCal;
+  var hiddenCals    = (prefs.hiddenCalendars) || {};
+
+  // ── Compute the four task/event lists shown in the rail ──
+
+  // Tasks for the selected day (apply hide-completed)
+  var dayTasks = (myTasks || []).filter(function(t){
+    if (t.dueDate !== selected || t.status === 'deleted') return false;
+    if (hideCompleted && t.status === 'completed')        return false;
+    return true;
+  });
+
+  // Events for the selected day (apply visibility + hide-completed)
+  var dayEvents = (_calEvents || []).filter(function(ev){
+    if (_ymdLocal(new Date(ev.start)) !== selected)              return false;
+    if (hiddenCals[ev.calendarId])                                return false;
+    if (hideCompleted && _eventStatuses[ev.id] === 'completed')   return false;
+    return true;
+  }).sort(function(a, b){ return new Date(a.start) - new Date(b.start); });
+
+  // Header summary counts
+  var pendDay = dayTasks.filter(function(t){ return t.status !== 'completed'; });
+  var doneDay = dayTasks.length - pendDay.length;
+
+  // Overdue count is global (independent of selected day)
+  var overdueCount = (myTasks || []).filter(function(t){
+    return t.dueDate && t.dueDate < todayStr && t.status !== 'completed' && t.status !== 'deleted';
+  }).length;
+
+  // "Coming up" = future tasks after the selected day, capped at 8
+  var upcoming = (myTasks || []).filter(function(t){
+    if (!t.dueDate || t.status === 'deleted')      return false;
+    if (t.dueDate <= selected)                      return false;
+    if (hideCompleted && t.status === 'completed') return false;
+    return true;
+  }).sort(function(a, b){ return a.dueDate.localeCompare(b.dueDate); }).slice(0, 8);
+
+  // Header summary string
+  var summary = pendDay.length + ' task' + (pendDay.length === 1 ? '' : 's');
+  if (doneDay)           summary += ' \u00b7 ' + doneDay + ' done';
+  if (dayEvents.length)  summary += ' \u00b7 ' + dayEvents.length + ' event' + (dayEvents.length === 1 ? '' : 's');
+
+  // ── Now build the HTML, section by section ──
+
+  // Today/selected header
+  var html = '<div class="cal2-rail-today">' +
+    '<div class="cal2-rail-dow">' + dowName + '</div>' +
+    '<div class="cal2-rail-date">' + dateLabel + '</div>' +
+    '<div class="cal2-rail-sum">' + summary + '</div>' +
+    '</div>';
+
+  // SECTION 1: Overdue (only when there are overdue tasks)
+  if (overdueCount > 0){
+    var overdueList = (myTasks || []).filter(function(t){
+      return t.dueDate && t.dueDate < todayStr && t.status !== 'completed' && t.status !== 'deleted';
+    }).sort(function(a, b){ return a.dueDate.localeCompare(b.dueDate); });
+
+    var open = !!_calOverdueOpen;
+    html += '<div class="cal2-rail-ovd' + (open ? ' op' : '') + '" onclick="toggleCalOverdue()">' +
+      '<span class="cal2-rail-ovd-mark">&#9888;</span>' +
+      '<div style="flex:1;"><strong>' + overdueCount + ' Overdue</strong> task' + (overdueCount === 1 ? '' : 's') + ' need attention</div>' +
+      '<span class="cal2-rail-ovd-arr">' + (open ? '\u25BE' : '\u25B8') + '</span>' +
+      '</div>';
+    if (open){
+      html += '<div class="cal2-rail-ovd-list">' +
+        overdueList.map(function(t){
+          var done = t.status === 'completed';
+          return '<div class="cal2-rail-ovd-row" onclick="calEditTask(\'' + t.id + '\')">' +
+            '<span class="cal2-rail-chk' + (done ? ' on' : '') + '" style="border-color:#ef4444;' + (done ? 'background:#ef4444;' : '') + '" onclick="event.stopPropagation();calToggleTask(\'' + t.id + '\')"></span>' +
+            '<div class="cal2-rail-body">' +
+              '<div class="cal2-rail-title">' + esc(t.title) + '</div>' +
+              '<div class="cal2-rail-meta" style="color:#dc2626;">' + (t.subject ? esc(t.subject) + ' \u00b7 ' : '') + 'Due ' + fmtDate(t.dueDate) + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('') +
+        '</div>';
+    }
+  }
+
+  // SECTION 2: Due Today (or "Due This Day" if not the actual today)
+  html += '<div class="cal2-rail-sec">';
+  html += '<div class="cal2-rail-shdr">' + (isToday ? 'DUE TODAY' : 'DUE THIS DAY') + '</div>';
+  if (dayTasks.length === 0) html += '<div class="cal2-rail-empty">No tasks for this day</div>';
+  else                       html += dayTasks.map(_railTaskRow).join('');
+  html += '</div>';
+
+  // SECTION 3: Coming Up (intentionally before Events)
+  html += '<div class="cal2-rail-sec">';
+  html += '<div class="cal2-rail-shdr">COMING UP</div>';
+  if (upcoming.length === 0) html += '<div class="cal2-rail-empty">No upcoming tasks</div>';
+  else                       html += upcoming.map(_railTaskRow).join('');
+  html += '</div>';
+
+  // SECTION 4: Events for the selected day
+  if (dayEvents.length){
+    html += '<div class="cal2-rail-sec">';
+    html += '<div class="cal2-rail-shdr">EVENTS</div>';
+    html += dayEvents.map(function(ev){
+      var s     = new Date(ev.start);
+      var time  = ev.allDay ? 'All day' : _fmtTimeLocal(s);
+      var color = ev.calendarColor || '#6366f1';
+      var done  = _eventStatuses[ev.id] === 'completed';
+      return '<div class="cal2-rail-row' + (done ? ' done' : '') + '" onclick="calOpenEvent(\'' + esc(ev.id) + '\')">' +
+        '<span class="cal2-rail-chk' + (done ? ' on' : '') + '" style="border-color:' + color + ';' + (done ? 'background:' + color + ';' : '') + '" onclick="event.stopPropagation();calToggleEvent(\'' + esc(ev.id) + '\')"></span>' +
+        '<div class="cal2-rail-body">' +
+          '<div class="cal2-rail-title">' + esc(ev.title) + '</div>' +
+          '<div class="cal2-rail-meta">' + time + '</div>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+    html += '</div>';
+  }
+
+  // CALENDARS list — collected from the events we've loaded so far.
+  // Each calendar can be toggled on/off (persists to prefs.hiddenCalendars).
+  var calMap = {};
+  (_calEvents || []).forEach(function(ev){
+    if (!ev.calendarId) return;
+    if (!calMap[ev.calendarId]){
+      calMap[ev.calendarId] = {
+        id:    ev.calendarId,
+        name:  ev.calendarName || ev.calendarId,
+        color: ev.calendarColor || '#6366f1'
+      };
+    }
+  });
+  var calList = Object.values(calMap).sort(function(a, b){ return a.name.localeCompare(b.name); });
+  if (calList.length){
+    var openC = !!_calCalsOpen;
+    html += '<div class="cal2-rail-sec">';
+    html += '<div class="cal2-rail-cals-hdr" onclick="toggleCalCals()">' +
+      '<span>CALENDARS</span>' +
+      '<span class="cal2-rail-cals-arr">' + (openC ? '\u25BE' : '\u25B8') + '</span>' +
+    '</div>';
+    if (openC){
+      html += '<div class="cal2-rail-cals-list">';
+      calList.forEach(function(c){
+        var hidden = !!hiddenCals[c.id];
+        html += '<label class="cal2-rail-cal' + (hidden ? ' off' : '') + '" onclick="event.stopPropagation();">' +
+          '<input type="checkbox" ' + (hidden ? '' : 'checked') + ' onchange="toggleCalendarVisibility(\'' + esc(c.id) + '\')">' +
+          '<span class="cal2-rail-cal-dot" style="background:' + c.color + ';"></span>' +
+          '<span class="cal2-rail-cal-name">' + esc(c.name) + '</span>' +
+        '</label>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  rail.innerHTML = html;
+}
+
+// Toggle the overdue accordion in the rail.
+function toggleCalOverdue(){
+  _calOverdueOpen = !_calOverdueOpen;
+  renderCalRail();
+}
+
+// Toggle the calendars-list accordion in the rail.
+function toggleCalCals(){
+  _calCalsOpen = !_calCalsOpen;
+  renderCalRail();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   12. VISIBILITY + COMPLETION
+   ═══════════════════════════════════════════════════════════════════ */
+
+// User toggled a calendar's visibility checkbox. Persists to prefs.hiddenCalendars.
+// Re-renders both the main view and the rail.
+function toggleCalendarVisibility(calId){
+  if (!prefs.hiddenCalendars) prefs.hiddenCalendars = {};
+  if (prefs.hiddenCalendars[calId]) delete prefs.hiddenCalendars[calId];
+  else                              prefs.hiddenCalendars[calId] = true;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  renderCalView();
+  renderCalRail();
+}
+
+// Toggle a Google Calendar event's done state. Optimistically updates
+// the local + cached status, then persists to setEventStatus. Rolls
+// back the local state on server failure.
+function calToggleEvent(eventId){
+  var current = _eventStatuses[eventId] || '';
+  var next    = current === 'completed' ? '' : 'completed';
+
+  // Optimistic update — local state first
+  _eventStatuses[eventId] = next;
+  // Also patch cached entries so a re-render from cache stays in sync
+  Object.keys(_calCache).forEach(function(k){
+    if (_calCache[k] && _calCache[k].statuses) _calCache[k].statuses[eventId] = next;
+  });
+
+  google.script.run
+    .withFailureHandler(function(){
+      // Roll back on failure and toast the user
+      _eventStatuses[eventId] = current;
+      renderCalView();
+      renderCalRail();
+      toast('Could not save event status', 'err');
+    })
+    .setEventStatus(eventId, next);
+
+  renderCalView();
+  renderCalRail();
+}
+
+// Footer "Hide completed" checkbox handler.
+function toggleHideCompleted(checked){
+  prefs.hideCompletedCal = !!checked;
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  renderCalView();
+  renderCalRail();
+}
+
+</script>

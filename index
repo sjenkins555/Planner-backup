@@ -658,6 +658,9 @@ var DEF_PREFS = {
   spotifyUrl: '',
   stockSymbols: 'AAPL',
   tileSizes: {},
+  tilePositions: {},
+  teacherTilePositions: {},
+  adminTilePositions: {},
   countdowns: [],
   schedCols: ['period','subject','teacher','room','time'],
   schedHighlight: true,
@@ -833,7 +836,10 @@ window.onload = function(){
     .withFailureHandler(function(e){
       clearTimeout(hint);
       clearTimeout(fail);
-      showErr('Script error: ' + e.message + '\n\nAuthorize the script from the Apps Script editor first.');
+      var details = 'Error: ' + (e && e.message ? e.message : String(e));
+      if (e && e.name) details += '\n\nType: ' + e.name;
+      details += '\n\nIf this mentions "permission" or "document", the script may be missing access to the spreadsheet OR the shared library. Send this whole message to Mr. Jenkins.';
+      showErr(details);
     })
     .getBootData();
 };
@@ -943,6 +949,12 @@ function bootApp(){
         .getCalendarPageData(range.start.toISOString(), range.end.toISOString(), JSON.stringify([]));
     } catch(e){}
   }, 1500);
+  
+  // Reveal customize buttons based on role
+  var btnT = document.getElementById('btn-customize-teacher');
+  var btnA = document.getElementById('btn-customize-admin');
+  if (btnT) btnT.style.display = (CU && CU.role === 'teacher') ? '' : 'none';
+  if (btnA) btnA.style.display = (CU && CU.role === 'admin')   ? '' : 'none';
 }
 
 // Toggle the user's effective role between teacher and student.
@@ -1390,40 +1402,7 @@ function tempLabel(){
 
 // Build and open the "+ Add Widgets" modal.
 function openWidgetPicker(){
-  // Map each widget id to the SVG symbol used in its card icon
-  var ICON_MAP = {
-    clock:'w-clock', schedule:'w-schedule', tasks:'w-todo', notes:'w-notes',
-    links:'w-link', weather:'w-weather', quote:'w-quote', timer:'w-timer',
-    countdowns:'w-countdown', search:'w-search', gapps:'w-apps', spotify:'w-music',
-    stocks:'w-stock', lunch:'w-lunch', scores:'w-chart',
-    rowbank:'w-rowoars', rowapprovals:'w-rowoars'
-  };
-  function svgIco(symId){
-    return '<svg viewBox="0 0 24 24" width="20" height="20" style="stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;color:var(--a2);"><use href="#' + symId + '"/></svg>';
-  }
-
-  // Cards for built-in widgets
-  var builtIn = ALL_WIDGETS.map(function(w){
-    var a = prefs.tileOrder.indexOf(w.id) > -1;
-    var ico = svgIco(ICON_MAP[w.id] || 'w-apps');
-    return '<div class="widget-opt' + (a ? ' active' : '') + '" id="wo-' + w.id + '" onclick="toggleWidget(\'' + w.id + '\')"><div class="widget-opt-icon">' + ico + '</div><div class="widget-opt-info"><div class="widget-name">' + w.name + '</div><div class="widget-desc">' + w.desc + '</div></div></div>';
-  }).join('');
-
-  // Cards for embedded documents (teacher-only, dynamic)
-  var embedDocsHtml = (myEmbeddedDocs || []).map(function(d){
-    var tileId = 'embed-' + d.id;
-    var a = prefs.tileOrder.indexOf(tileId) > -1;
-    var ico = svgIco('w-embed');
-    var typeLabel = ({doc:'Google Doc',sheet:'Google Sheet',slides:'Google Slides',form:'Google Form'})[d.docType] || 'Document';
-    return '<div class="widget-opt' + (a ? ' active' : '') + '" id="wo-' + tileId + '" onclick="toggleWidget(\'' + tileId + '\')"><div class="widget-opt-icon">' + ico + '</div><div class="widget-opt-info"><div class="widget-name">' + esc(d.title) + '</div><div class="widget-desc">' + typeLabel + '</div></div></div>';
-  }).join('');
-
-  var html = builtIn;
-  if (embedDocsHtml){
-    html += '<div style="grid-column:1/-1;font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:var(--a2);margin:12px 0 4px;padding-top:10px;border-top:1px solid var(--border);">Embedded Documents</div>' + embedDocsHtml;
-  }
-  document.getElementById('widget-grid').innerHTML = html;
-  openModal('widget-modal');
+  openLayoutEditor();
 }
 
 // Toggle a widget on or off in the user's tileOrder.
@@ -1773,6 +1752,77 @@ function hideWidgetLoader(tileId){
    String/date/time formatting used everywhere.
    ═══════════════════════════════════════════════════════════════════ */
 
+// ─── In-app confirm dialog ──────────────────────────────────────
+// Replacement for the browser's native confirm() popup, which looks
+// alarming in school environments. Returns a Promise that resolves
+// to true (confirmed) or false (cancelled). Styled to match the app.
+//
+// Usage:
+//   appConfirm('Delete this note?').then(function(ok){ if (ok) ... });
+//   appConfirm('Cancel this request?', {okText:'Yes, cancel', cancelText:'Keep it', tone:'warn'}).then(...);
+function appConfirm(message, opts){
+  opts = opts || {};
+  var okText     = opts.okText     || 'Confirm';
+  var cancelText = opts.cancelText || 'Cancel';
+  var title      = opts.title      || 'Are you sure?';
+  var tone       = opts.tone       || 'warn'; // 'warn' | 'danger' | 'info'
+
+  // Tear down any prior instance (defensive — shouldn't normally happen)
+  var existing = document.getElementById('app-confirm-modal');
+  if (existing) existing.remove();
+
+  return new Promise(function(resolve){
+    var btnColor = tone === 'danger' ? '#ef4444' : (tone === 'info' ? 'var(--a2)' : '#fbbf24');
+    var btnTextColor = tone === 'info' ? '#fff' : '#000';
+
+    var ov = document.createElement('div');
+    ov.id = 'app-confirm-modal';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;animation:appcfFade .15s ease-out;';
+    ov.innerHTML =
+      '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;max-width:380px;width:90%;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:appcfPop .18s cubic-bezier(.2,.9,.3,1.4);">'
+        + '<div style="font-size:15px;font-weight:600;color:var(--tx);margin-bottom:8px;">' + esc(title) + '</div>'
+        + '<div style="font-size:13px;color:var(--tx2);line-height:1.5;margin-bottom:18px;">' + esc(message) + '</div>'
+        + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
+          + '<button id="appcf-cancel" class="btn btn-ghost btn-sm" style="font-size:12px;padding:6px 14px;">' + esc(cancelText) + '</button>'
+          + '<button id="appcf-ok" class="btn btn-sm" style="font-size:12px;padding:6px 14px;background:' + btnColor + ';color:' + btnTextColor + ';border:none;font-weight:600;">' + esc(okText) + '</button>'
+        + '</div>'
+      + '</div>';
+
+    // One-time inject of the fade/pop keyframes
+    if (!document.getElementById('appcf-kf')){
+      var style = document.createElement('style');
+      style.id = 'appcf-kf';
+      style.textContent = '@keyframes appcfFade{from{opacity:0}to{opacity:1}}@keyframes appcfPop{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}';
+      document.head.appendChild(style);
+    }
+
+    document.body.appendChild(ov);
+
+    function close(result){
+      ov.style.opacity = '0';
+      setTimeout(function(){ if (ov.parentNode) ov.remove(); }, 120);
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+
+    function onKey(e){
+      if (e.key === 'Escape') close(false);
+      else if (e.key === 'Enter') close(true);
+    }
+    document.addEventListener('keydown', onKey);
+
+    document.getElementById('appcf-ok').onclick     = function(){ close(true);  };
+    document.getElementById('appcf-cancel').onclick = function(){ close(false); };
+    ov.onclick = function(e){ if (e.target === ov) close(false); };
+
+    // Auto-focus the cancel button — safer default than auto-confirming
+    setTimeout(function(){
+      var cb = document.getElementById('appcf-cancel');
+      if (cb) cb.focus();
+    }, 50);
+  });
+}
+
 // Show a transient toast notification. Types: 'inf' (default), 'ok', 'err'.
 function toast(msg, type){
   type = type || 'inf';
@@ -1920,6 +1970,9 @@ function dropScienceFace(){
 
 <!-- Admin tab: 9 widgets (Bell, Schedule Cal, Stats, Repair, Lunch, Grad, Row, Reminders, Cleanup) -->
 <?!= include('index_admin_widgets') ?>
+
+<!-- Layout editor — graph paper widget canvas (replaces the old widget picker modal) -->
+<?!= include('index_layout_editor') ?>
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    ║  SECONDARY SCRIPT BLOCK — POST-CHUNK FEATURES
@@ -2040,17 +2093,69 @@ function pickRowCat(el){
   _rowSelectedCat = el.dataset.cat;
 }
 
+// Module-level flag — true while a request is in flight or in its
+// 3-second cool-down. Lives outside submitRowRequest so it survives
+// across button re-renders and DOM reshuffles.
+var _rowSubmitLocked = false;
+
 // Submit a new ROW request to the selected teacher.
+// Quadruple-locked against spam: (1) JS flag blocks function entry,
+// (2) button disabled, (3) spinner shown, (4) 3-second minimum
+// cool-down before the lock releases even on instant server replies.
 function submitRowRequest(){
+  if (_rowSubmitLocked) return;  // hard block — already in flight or cooling down
+
   var teachSel = document.getElementById('row-teach-sel');
-  var descEl = document.getElementById('row-desc');
-  var teacher = teachSel ? teachSel.value : '';
-  var desc = descEl ? descEl.value.trim() : '';
-  var sel = document.querySelector('#row-cat-grid .row-cat-opt.sel');
-  var cat = sel ? sel.dataset.cat : _rowSelectedCat;
+  var descEl   = document.getElementById('row-desc');
+  var teacher  = teachSel ? teachSel.value : '';
+  var desc     = descEl ? descEl.value.trim() : '';
+  var sel      = document.querySelector('#row-cat-grid .row-cat-opt.sel');
+  var cat      = sel ? sel.dataset.cat : _rowSelectedCat;
 
   if (!teacher){ toast('Pick a teacher', 'err'); return; }
   if (!desc || desc.length < 3){ toast('Write a short description', 'err'); return; }
+
+  // Engage the lock immediately, before anything else can run
+  _rowSubmitLocked = true;
+  var lockStart = Date.now();
+
+  // Find the visible "Send Request" button. We scan all buttons rather
+  // than scoping to a container because the button may live on the
+  // widget back, the flip panel, or elsewhere depending on the layout.
+  var btn = null;
+  var candidates = document.querySelectorAll('button');
+  for (var i = 0; i < candidates.length; i++){
+    if (/Send Request/i.test(candidates[i].textContent) && candidates[i].offsetParent !== null){
+      btn = candidates[i];
+      break;
+    }
+  }
+  var origHTML = btn ? btn.innerHTML : '';
+  if (btn){
+    btn.disabled = true;
+    btn.innerHTML = '<span style="display:inline-block;width:11px;height:11px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:row-spin 0.6s linear infinite;vertical-align:-2px;margin-right:7px;"></span>Sending...';
+  }
+
+  // One-time inject of the spinner keyframes so we don't need any CSS edits
+  if (!document.getElementById('row-spin-kf')){
+    var style = document.createElement('style');
+    style.id = 'row-spin-kf';
+    style.textContent = '@keyframes row-spin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+  }
+
+  // Unlock helper — enforces 3-second minimum regardless of server speed
+  function unlock(){
+    var elapsed = Date.now() - lockStart;
+    var remaining = Math.max(0, 3000 - elapsed);
+    setTimeout(function(){
+      _rowSubmitLocked = false;
+      if (btn){
+        btn.disabled = false;
+        btn.innerHTML = origHTML || 'Send Request';
+      }
+    }, remaining);
+  }
 
   google.script.run.withSuccessHandler(function(r){
     if (r.success){
@@ -2060,16 +2165,57 @@ function submitRowRequest(){
     } else {
       toast(r.error || 'Could not send request', 'err');
     }
+    unlock();
+  }).withFailureHandler(function(e){
+    toast((e && e.message) ? e.message : 'Could not send request', 'err');
+    unlock();
   }).requestRow(teacher, cat, desc);
 }
 
 // Cancel a pending ROW request the student created.
+// Cancel a pending ROW request. The cancel button disables and shows
+// "Cancelling..." the moment the student confirms, so they can't
+// double-click it and they get clear feedback during the server call.
 function cancelRowReq(id){
-  if (!confirm('Cancel this pending ROW request?')) return;
-  google.script.run.withSuccessHandler(function(r){
-    if (r.success){ toast('Request cancelled', 'inf'); loadMyRows(); }
-    else toast(r.error || 'Could not cancel', 'err');
-  }).cancelMyRowRequest(id);
+  appConfirm('This will cancel your pending ROW request. You can always submit a new one.', {
+    title: 'Cancel this request?',
+    okText: 'Yes, cancel it',
+    cancelText: 'Keep it',
+    tone: 'warn'
+  }).then(function(ok){
+    if (!ok) return;
+
+    // Find the cancel button for THIS request and lock it. We scan all
+    // buttons with the matching onclick handler since the pending list
+    // doesn't give individual cancel buttons unique IDs.
+    var btn = null;
+    var candidates = document.querySelectorAll('#row-pending-area button');
+    for (var i = 0; i < candidates.length; i++){
+      if (candidates[i].getAttribute('onclick') && candidates[i].getAttribute('onclick').indexOf(id) > -1){
+        btn = candidates[i];
+        break;
+      }
+    }
+    var origText = btn ? btn.textContent : '';
+    if (btn){
+      btn.disabled = true;
+      btn.textContent = 'Cancelling...';
+    }
+
+    google.script.run.withSuccessHandler(function(r){
+      if (r.success){
+        toast('Request cancelled', 'inf');
+        loadMyRows();  // re-renders the pending area, button goes away with the row
+      } else {
+        toast(r.error || 'Could not cancel', 'err');
+        // Restore the button so they can try again
+        if (btn){ btn.disabled = false; btn.textContent = origText; }
+      }
+    }).withFailureHandler(function(e){
+      toast((e && e.message) || 'Could not cancel', 'err');
+      if (btn){ btn.disabled = false; btn.textContent = origText; }
+    }).cancelMyRowRequest(id);
+  });
 }
 
 
@@ -2080,67 +2226,263 @@ function cancelRowReq(id){
    optional comment.
    ═══════════════════════════════════════════════════════════════════ */
 
+// TEMPORARY DEBUG — call rowDebug() from anywhere to see what the server
+// returns. Shows result in an alert popup. Remove once issue is fixed.
+function rowDebug(){
+  alert('Calling server... wait for the next popup.');
+  google.script.run
+    .withSuccessHandler(function(r){
+      var summary = 'SERVER RESPONSE:\n\n'
+        + 'success: ' + (r && r.success) + '\n'
+        + 'error: ' + (r && r.error ? r.error : '(none)') + '\n'
+        + 'request count: ' + (r && r.requests ? r.requests.length : 'undefined') + '\n\n';
+      if (r && r.requests && r.requests.length){
+        summary += 'FIRST REQUEST:\n' + JSON.stringify(r.requests[0], null, 2);
+      }
+      alert(summary);
+    })
+    .withFailureHandler(function(e){
+      alert('SERVER FAILURE:\n\n' + (e && e.message ? e.message : String(e)));
+    })
+    .getPendingRowRequestsForTeacher();
+}
+
+// Show current user info (role + email) in a popup
+function rowDebugUser(){
+  alert('Current user:\n\n'
+    + 'email: ' + (CU && CU.email) + '\n'
+    + 'role: ' + (CU && CU.role) + '\n'
+    + 'realRole: ' + (CU && CU.realRole) + '\n\n'
+    + 'teacherTileOrder: ' + JSON.stringify(prefs && prefs.teacherTileOrder));
+}
+
+// Local cache of the currently-displayed pending list. Lets us splice
+// rows out instantly on approve/deny instead of re-fetching the whole
+// list from the server every time.
+var _rowPendingCache = [];
+
 // Load pending ROW requests for the current teacher.
+// Hardened: every step logs to console, render loop is wrapped in
+// try/catch so a bad record can't kill the widget, and a 10-second
+// timeout guarantees the user always sees an outcome.
 function loadRowApprovals(){
+  console.log('[ROW] loadRowApprovals called');
+
   var body = document.getElementById('row-approvals-body');
-  if (!body) return;
+  if (!body){ console.warn('[ROW] body element not found — aborting'); return; }
 
   if (!CU || CU.role !== 'teacher'){
     body.innerHTML = '<div class="empty"><p style="font-size:12px;">Teacher access only.</p></div>';
     return;
   }
 
-  showWidgetLoader('rowapprovals', 'sm');
+  body.innerHTML = '<div class="empty" style="padding:18px 8px;"><p style="font-size:12px;color:var(--tx3);">Loading requests...</p></div>';
 
-  google.script.run.withSuccessHandler(function(r){
-    if (!r.success){
-      body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc(r.error || 'Error') + '</div>';
-      hideWidgetLoader('rowapprovals');
-      return;
-    }
-    if (!r.requests.length){
-      body.innerHTML = '<div class="empty" style="padding:18px 8px;"><div class="empty-ico row-approvals-emo" style="display:none;">&#10003;</div><p style="font-size:12px;">No pending requests.</p></div>';
-      return;
-    }
-    // Build the request list — each row has student info, category, description,
-    // amount input (default 1), comment input, and Approve/Deny buttons.
-    body.innerHTML = '<div class="row-req-list">' + r.requests.map(function(req){
-      var when = req.createdAt ? fmtDate(req.createdAt.slice(0,10)) : '';
-      return '<div class="row-req" id="rr-' + esc(req.id) + '"><div class="row-req-top"><div class="row-req-name">' + esc(req.studentName) + '</div><span class="row-req-cat">' + esc(req.category) + '</span>' + (when ? '<span class="row-req-time">' + when + '</span>' : '') + '</div><div class="row-req-desc">' + esc(req.description) + '</div><div class="row-req-actions"><input class="finp" type="number" id="ra-amt-' + esc(req.id) + '" value="1" min="1" max="10" title="Amount"><input class="finp cmt" type="text" id="ra-cmt-' + esc(req.id) + '" placeholder="Comment (optional)" maxlength="200"><button class="btn btn-primary btn-sm" onclick="approveRowReq(\'' + esc(req.id) + '\')">Approve</button><button class="btn btn-danger btn-sm" onclick="denyRowReq(\'' + esc(req.id) + '\')">Deny</button></div></div>';
-    }).join('') + '</div>';
-    hideWidgetLoader('rowapprovals');
-  }).withFailureHandler(function(e){
-    body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc(e.message) + '</div>';
-    hideWidgetLoader('rowapprovals');
-  }).getPendingRowRequestsForTeacher();
+  var resolved = false;
+  var timeoutId = setTimeout(function(){
+    if (resolved) return;
+    resolved = true;
+    var b = document.getElementById('row-approvals-body');
+    if (b) b.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">Request timed out. Click Refresh to retry.</div>';
+  }, 10000);
+
+  google.script.run
+    .withSuccessHandler(function(r){
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeoutId);
+      console.log('[ROW] server returned:', r);
+
+      if (!r || !r.success){
+        body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((r && r.error) || 'Unknown error') + '</div>';
+        return;
+      }
+      _rowPendingCache = (r.requests || []).slice();
+      renderRowApprovalsList();
+    })
+    .withFailureHandler(function(e){
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeoutId);
+      body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((e && e.message) || 'Server error') + '</div>';
+    })
+    .getPendingRowRequestsForTeacher();
 }
 
-// Approve a request with the teacher's chosen amount and optional comment.
+// Render the cached pending list. Called by loadRowApprovals after
+// fetch, and by approve/deny handlers after splicing the cache locally.
+// Separating render from fetch is what makes approve/deny feel instant —
+// we don't have to round-trip to the server just to redraw the list.
+function renderRowApprovalsList(){
+  var body = document.getElementById('row-approvals-body');
+  if (!body) return;
+
+  if (!_rowPendingCache.length){
+    body.innerHTML = '<div class="empty" style="padding:18px 8px;"><p style="font-size:12px;">No pending requests.</p></div>';
+    return;
+  }
+
+  // Header row with bulk-action controls. Approve All triggers a server
+  // batch (one call, all requests at 1 ROW each) with a confirmation prompt.
+  var header = '<div style="display:flex;align-items:center;gap:8px;padding:0 4px 8px;margin-bottom:6px;border-bottom:1px solid var(--border);">'
+    + '<span style="font-size:11px;color:var(--tx3);">' + _rowPendingCache.length + ' pending</span>'
+    + '<button class="btn btn-primary btn-sm" id="row-approve-all-btn" onclick="approveAllRows()" style="margin-left:auto;font-size:11px;padding:3px 9px;" title="Approve all pending at 1 ROW each">Approve All</button>'
+    + '</div>';
+
+  var rows = _rowPendingCache.map(function(req, idx){
+    try {
+      var when = '';
+      if (req.createdAt && typeof fmtDate === 'function'){
+        try { when = fmtDate(req.createdAt.slice(0,10)); } catch(eDate){ when = req.createdAt.slice(0,10); }
+      }
+      return '<div class="row-req" id="rr-' + esc(req.id) + '">'
+        + '<div class="row-req-top">'
+          + '<div class="row-req-name">' + esc(req.studentName || req.studentEmail || '?') + '</div>'
+          + '<span class="row-req-cat">' + esc(req.category || '') + '</span>'
+          + (when ? '<span class="row-req-time">' + esc(when) + '</span>' : '')
+        + '</div>'
+        + '<div class="row-req-desc">' + esc(req.description || '') + '</div>'
+        + '<div class="row-req-actions" id="rra-' + esc(req.id) + '">'
+          + '<input class="finp" type="number" id="ra-amt-' + esc(req.id) + '" value="1" min="1" max="10" title="Amount">'
+          + '<input class="finp cmt" type="text" id="ra-cmt-' + esc(req.id) + '" placeholder="Comment (optional)" maxlength="200">'
+          + '<button class="btn btn-primary btn-sm" id="ra-app-' + esc(req.id) + '" onclick="approveRowReq(\'' + esc(req.id) + '\')">Approve</button>'
+          + '<button class="btn btn-danger btn-sm" id="ra-den-' + esc(req.id) + '" onclick="denyRowReq(\'' + esc(req.id) + '\')">Deny</button>'
+        + '</div>'
+      + '</div>';
+    } catch(eRow){
+      console.error('[ROW] failed to render request #' + idx, eRow, req);
+      return '';
+    }
+  }).join('');
+
+  body.innerHTML = header + '<div class="row-req-list">' + rows + '</div>';
+}
+
+// Lock a single row's buttons + show "Approving..." or "Denying..." text.
+// Returns a function that, when called, removes the row from the DOM and
+// splices it out of the local cache. Used by both approve/deny handlers.
+function _lockRowReq(id, action){
+  var appBtn = document.getElementById('ra-app-' + id);
+  var denBtn = document.getElementById('ra-den-' + id);
+  var amtInp = document.getElementById('ra-amt-' + id);
+  var cmtInp = document.getElementById('ra-cmt-' + id);
+  if (appBtn){ appBtn.disabled = true; if (action === 'approve') appBtn.textContent = 'Approving...'; }
+  if (denBtn){ denBtn.disabled = true; if (action === 'deny')    denBtn.textContent = 'Denying...';   }
+  if (amtInp) amtInp.disabled = true;
+  if (cmtInp) cmtInp.disabled = true;
+
+  // Return a "finish" callback: removes the row from DOM + cache
+  return function(success){
+    if (success){
+      var rowEl = document.getElementById('rr-' + id);
+      if (rowEl) rowEl.remove();
+      _rowPendingCache = _rowPendingCache.filter(function(req){ return req.id !== id; });
+      // If that was the last one, re-render to show the "No pending" state
+      if (!_rowPendingCache.length) renderRowApprovalsList();
+      else {
+        // Update the "N pending" count in the header
+        var countEl = document.querySelector('#row-approvals-body div span');
+        if (countEl) countEl.textContent = _rowPendingCache.length + ' pending';
+      }
+    } else {
+      // Re-enable the row's controls on failure
+      if (appBtn){ appBtn.disabled = false; appBtn.textContent = 'Approve'; }
+      if (denBtn){ denBtn.disabled = false; denBtn.textContent = 'Deny'; }
+      if (amtInp) amtInp.disabled = false;
+      if (cmtInp) cmtInp.disabled = false;
+    }
+  };
+}
+
+// Approve a single request. Disables the row immediately, shows "Approving...",
+// removes the row from the DOM as soon as the server confirms.
 function approveRowReq(id){
   var amt = parseInt((document.getElementById('ra-amt-' + id) || {}).value || 1, 10);
   var cmt = (document.getElementById('ra-cmt-' + id) || {}).value || '';
   if (isNaN(amt) || amt < 1 || amt > 10){ toast('Amount must be 1–10', 'err'); return; }
 
+  var finish = _lockRowReq(id, 'approve');
+
   google.script.run.withSuccessHandler(function(r){
-    if (r.success){
+    if (r && r.success){
       toast('Approved ' + amt + ' ROW' + (amt > 1 ? 's' : ''), 'ok');
-      loadRowApprovals();
-    } else toast(r.error || 'Error', 'err');
+      finish(true);
+    } else {
+      toast((r && r.error) || 'Error', 'err');
+      finish(false);
+    }
+  }).withFailureHandler(function(e){
+    toast((e && e.message) || 'Could not approve', 'err');
+    finish(false);
   }).approveRowRequest(id, amt, cmt);
 }
 
-// Deny a request (with confirmation) and optional comment.
+// Deny a single request with confirmation. Same instant-row-removal pattern.
 function denyRowReq(id){
   var cmt = (document.getElementById('ra-cmt-' + id) || {}).value || '';
-  if (!confirm('Deny this ROW request?')) return;
+  appConfirm('The student will see this request was denied. Make sure your comment (if any) is appropriate.', {
+    title: 'Deny this ROW request?',
+    okText: 'Yes, deny',
+    cancelText: 'Go back',
+    tone: 'danger'
+  }).then(function(ok){
+    if (!ok) return;
 
-  google.script.run.withSuccessHandler(function(r){
-    if (r.success){ toast('Denied', 'inf'); loadRowApprovals(); }
-    else toast(r.error || 'Error', 'err');
-  }).denyRowRequest(id, cmt);
+    var finish = _lockRowReq(id, 'deny');
+
+    google.script.run.withSuccessHandler(function(r){
+      if (r && r.success){
+        toast('Denied', 'inf');
+        finish(true);
+      } else {
+        toast((r && r.error) || 'Error', 'err');
+        finish(false);
+      }
+    }).withFailureHandler(function(e){
+      toast((e && e.message) || 'Could not deny', 'err');
+      finish(false);
+    }).denyRowRequest(id, cmt);
+  });
 }
 
+// Approve every pending request at 1 ROW each. Fires N server calls in
+// parallel so wall-clock time is roughly one Apps Script round-trip
+// (~2-3s) instead of N round-trips. Updates UI as each one completes.
+function approveAllRows(){
+  if (!_rowPendingCache.length) return;
+  var n = _rowPendingCache.length;
+  if (!confirm('Approve all ' + n + ' pending requests at 1 ROW each?')) return;
 
+  // Disable the Approve All button + lock every row
+  var allBtn = document.getElementById('row-approve-all-btn');
+  if (allBtn){ allBtn.disabled = true; allBtn.textContent = 'Approving ' + n + '...'; }
+
+  var ids = _rowPendingCache.map(function(r){ return r.id; });
+  var finishers = {};
+  ids.forEach(function(id){ finishers[id] = _lockRowReq(id, 'approve'); });
+
+  var done = 0;
+  var succeeded = 0;
+  ids.forEach(function(id){
+    google.script.run.withSuccessHandler(function(r){
+      done++;
+      if (r && r.success){ succeeded++; finishers[id](true); }
+      else { finishers[id](false); }
+      if (allBtn){ allBtn.textContent = 'Approving ' + (n - done) + '...'; }
+      if (done === n){
+        toast('Approved ' + succeeded + ' of ' + n + ' requests', succeeded === n ? 'ok' : 'inf');
+        if (allBtn){ allBtn.disabled = false; allBtn.textContent = 'Approve All'; }
+      }
+    }).withFailureHandler(function(){
+      done++;
+      finishers[id](false);
+      if (done === n){
+        toast('Approved ' + succeeded + ' of ' + n + ' requests', 'inf');
+        if (allBtn){ allBtn.disabled = false; allBtn.textContent = 'Approve All'; }
+      }
+    }).approveRowRequest(id, 1, '');
+  });
+}
 /* ═══════════════════════════════════════════════════════════════════
    3. ROW APPROVAL HISTORY MODAL
    Full-screen viewer for the teacher's past approvals/denials.

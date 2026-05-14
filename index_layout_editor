@@ -1,0 +1,482 @@
+<style>
+.le-screen{position:fixed;inset:0;z-index:500;background:var(--bg);display:none;flex-direction:column;font-family:'DM Sans',sans-serif}
+.le-screen.open{display:flex}
+.le-head{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(10,14,26,.95);backdrop-filter:blur(10px);flex-shrink:0}
+.le-back{width:34px;height:34px;border-radius:9px;background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px}
+.le-back:hover{background:var(--a3);color:var(--a2);border-color:var(--a4)}
+.le-title{flex:1;font-size:17px;font-weight:700;color:#ffffff;letter-spacing:.2px}
+.le-actions{display:flex;gap:8px}
+.le-cats{display:flex;gap:6px;padding:10px 18px;border-bottom:1px solid var(--border);background:rgba(10,14,26,.7);overflow-x:auto;scrollbar-width:none;flex-shrink:0}
+.le-cats::-webkit-scrollbar{display:none}
+.le-cat{padding:6px 14px;border-radius:99px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.25);color:#ffffff;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s;letter-spacing:.2px}
+.le-cat:hover{color:#ffffff;border-color:var(--a1);background:rgba(255,255,255,.16)}
+.le-cat.active{background:var(--a1);color:#ffffff;border-color:var(--a1);box-shadow:0 0 0 2px rgba(99,102,241,.25)}
+.le-rail{display:flex;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(10,14,26,.5);overflow-x:auto;scrollbar-width:thin;flex-shrink:0}
+.le-pill{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:10px;background:var(--bg2);border:1px solid var(--border);color:var(--tx);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.le-pill:hover{border-color:var(--a4);background:var(--a5)}
+.le-pill.placed{opacity:.55;cursor:pointer}
+.le-pill.placed:hover{border-color:#ef4444;background:rgba(239,68,68,.08);opacity:.85}
+.le-pill-ico{width:18px;height:18px;color:var(--a2);flex-shrink:0}
+.le-pill-add{width:20px;height:20px;border-radius:5px;background:var(--a3);color:var(--a2);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}
+.le-pill.placed .le-pill-add{background:rgba(34,197,94,.15);color:#22c55e}
+.le-canvas-wrap{flex:1;overflow:auto;padding:24px;background:linear-gradient(rgba(99,102,241,.06) 1px, transparent 1px),linear-gradient(90deg, rgba(99,102,241,.06) 1px, transparent 1px),var(--bg);background-size:40px 40px}
+.le-canvas{position:relative;display:grid;grid-template-columns:repeat(4, 1fr);grid-auto-rows:120px;gap:10px;max-width:1200px;margin:0 auto;min-height:720px}
+.le-cell-overlay{pointer-events:none;border-radius:10px;transition:all .12s;z-index:1}
+.le-cell-overlay.valid{background:rgba(34,197,94,.15);border:2px dashed #22c55e}
+.le-cell-overlay.invalid{background:rgba(239,68,68,.15);border:2px dashed #ef4444}
+.le-tile{background:var(--card);border:2px solid var(--border);border-radius:12px;padding:14px;cursor:move;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;transition:all .15s;position:relative;user-select:none}
+.le-tile:hover{border-color:var(--a4)}
+.le-tile.selected{border-color:var(--a1);box-shadow:0 0 0 2px var(--a4)}
+.le-tile.dragging{opacity:.4}
+.le-tile-ico{width:28px;height:28px;color:var(--a2)}
+.le-tile-name{font-size:12px;font-weight:600;color:var(--tx);text-align:center}
+.le-tile-size{font-family:'DM Mono',monospace;font-size:10px;color:var(--tx4);position:absolute;bottom:6px;right:8px}
+.le-toolbar{position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);display:flex;gap:5px;background:#111827;border:1px solid var(--border);border-radius:9px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:10}
+.le-tb-btn{padding:5px 10px;border-radius:6px;background:none;border:none;color:var(--tx2);font-size:12px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:4px;font-family:inherit}
+.le-tb-btn:hover{background:var(--a3);color:var(--a2)}
+.le-tb-btn.danger:hover{background:rgba(239,68,68,.15);color:#f87171}
+.le-size-pop{position:absolute;top:calc(100% + 50px);left:50%;transform:translateX(-50%);background:#111827;border:1px solid var(--border);border-radius:11px;padding:10px;box-shadow:0 12px 32px rgba(0,0,0,.6);z-index:20;width:200px}
+.le-size-pop-title{font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--tx3);margin-bottom:8px}
+.le-size-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.le-size-cell{padding:6px 2px;border-radius:6px;border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--tx3);font-size:10px;font-weight:500;text-align:center;cursor:pointer;font-family:'DM Mono',monospace;transition:all .12s}
+.le-size-cell:hover{background:var(--a5);border-color:var(--a4);color:var(--a2)}
+.le-size-cell.sel{background:var(--a3);border-color:var(--a1);color:var(--a2)}
+.le-size-cell.disabled{opacity:.3;cursor:not-allowed}
+</style>
+
+<div class="le-screen" id="layout-editor">
+  <div class="le-head">
+    <button class="le-back" onclick="closeLayoutEditor()" title="Back">&larr;</button>
+    <div class="le-title">Customize My Planner</div>
+    <div class="le-actions">
+      <button class="btn btn-ghost btn-sm" onclick="resetLayout()">Reset</button>
+      <button class="btn btn-primary btn-sm" onclick="saveLayout()">Save Layout</button>
+    </div>
+  </div>
+  <div class="le-cats" id="le-cats"></div>
+  <div class="le-rail" id="le-rail"></div>
+  <div class="le-canvas-wrap">
+    <div class="le-canvas" id="le-canvas"></div>
+  </div>
+</div>
+
+<script>
+var le_state = null;
+var le_selectedId = null;
+var le_activeCat = 'all';
+var le_dragId = null;
+var le_mode = 'home';
+var LE_MODES = {
+  home: {
+    title: 'Customize My Planner',
+    orderKey: 'tileOrder',
+    sizesKey: 'tileSizes',
+    positionsKey: 'tilePositions',
+    widgetsVar: 'ALL_WIDGETS',
+    rerenderFn: 'renderTileGrid'
+  },
+  teacher: {
+    title: 'Customize Teacher Dashboard',
+    orderKey: 'teacherTileOrder',
+    sizesKey: 'teacherTileSizes',
+    positionsKey: 'teacherTilePositions',
+    widgetsVar: 'TEACHER_WIDGETS',
+    rerenderFn: 'buildTeacherDashboard'
+  },
+  admin: {
+    title: 'Customize Admin Tools',
+    orderKey: 'adminTileOrder',
+    sizesKey: 'adminTileSizes',
+    positionsKey: 'adminTilePositions',
+    widgetsVar: 'ADMIN_WIDGETS',
+    rerenderFn: 'buildAdminPage'
+  }
+};
+
+var LE_CATEGORIES = {
+  school: ['schedule','tasks','notes','lunch','scores','rowbank'],
+  productivity: ['clock','timer','countdowns','reminders'],
+  info: ['weather','quote','stocks','scores'],
+  apps: ['links','search','gapps','spotify']
+};
+
+var LE_SIZES = [
+  {c:1,r:1},{c:2,r:1},{c:3,r:1},{c:4,r:1},
+  {c:1,r:2},{c:2,r:2},{c:3,r:2},{c:4,r:2},
+  {c:2,r:3},{c:3,r:3}
+];
+
+function openLayoutEditor(mode){
+  // Permission gate — students can't open teacher/admin editors
+  if (mode === 'teacher' && (!CU || CU.role !== 'teacher')) return;
+  if (mode === 'admin'   && (!CU || CU.role !== 'admin'))   return;
+
+  le_mode = mode || 'home';
+  var cfg = LE_MODES[le_mode];
+
+  le_state = {
+    tileOrder: (prefs[cfg.orderKey] || []).slice(),
+    tileSizes: JSON.parse(JSON.stringify(prefs[cfg.sizesKey] || {})),
+    tilePositions: JSON.parse(JSON.stringify(prefs[cfg.positionsKey] || {}))
+  };
+  le_selectedId = null;
+  le_activeCat = 'all';
+
+  // Update header title to reflect what's being customized
+  var titleEl = document.querySelector('#layout-editor .le-title');
+  if (titleEl) titleEl.textContent = cfg.title;
+
+  document.getElementById('layout-editor').classList.add('open');
+  renderLeCats();
+  renderLeRail();
+  renderLeCanvas();
+}
+
+function closeLayoutEditor(){
+  document.getElementById('layout-editor').classList.remove('open');
+  le_state = null;
+  le_selectedId = null;
+}
+
+function renderLeCats(){
+  // Home gets the full category set; teacher/admin only show "All"
+  // because their widget catalogs are small and don't map to school/productivity/etc.
+  var cats;
+  if (le_mode === 'home'){
+    cats = [
+      {id:'all', name:'All'},
+      {id:'school', name:'School'},
+      {id:'productivity', name:'Productivity'},
+      {id:'info', name:'Info'},
+      {id:'apps', name:'Apps'}
+    ];
+  } else {
+    cats = [{id:'all', name:'All'}];
+  }
+  document.getElementById('le-cats').innerHTML = cats.map(function(c){
+    return '<div class="le-cat' + (le_activeCat === c.id ? ' active' : '') + '" onclick="setLeCat(\'' + c.id + '\')">' + c.name + '</div>';
+  }).join('');
+}
+
+function setLeCat(id){
+  le_activeCat = id;
+  renderLeCats();
+  renderLeRail();
+}
+
+function renderLeRail(){
+  var ICON_MAP = {
+    clock:'w-clock', schedule:'w-schedule', tasks:'w-todo', notes:'w-notes',
+    links:'w-link', weather:'w-weather', quote:'w-quote', timer:'w-timer',
+    countdowns:'w-countdown', search:'w-search', gapps:'w-apps', spotify:'w-music',
+    stocks:'w-stock', lunch:'w-lunch', scores:'w-chart',
+    rowbank:'w-rowoars', rowapprovals:'w-rowoars', reminders:'w-timer'
+  };
+  // Pick the right widget catalog based on the current editor mode
+  var cfg = LE_MODES[le_mode];
+  var widgetArr = window[cfg.widgetsVar];
+  if (!widgetArr || !widgetArr.length) widgetArr = ALL_WIDGETS;  // safe fallback
+
+  var widgets = widgetArr.filter(function(w){
+    if (le_activeCat === 'all') return true;
+    return (LE_CATEGORIES[le_activeCat] || []).indexOf(w.id) > -1;
+  });
+
+  document.getElementById('le-rail').innerHTML = widgets.map(function(w){
+    var placed = le_state.tileOrder.indexOf(w.id) > -1;
+    var icoSym = ICON_MAP[w.id] || 'w-apps';
+    var marker = placed ? '&check;' : '+';
+    return '<div class="le-pill' + (placed ? ' placed' : '') + '" onclick="lePillClick(\'' + w.id + '\')">'
+      + '<svg class="le-pill-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use href="#' + icoSym + '"/></svg>'
+      + '<span>' + w.name + '</span>'
+      + '<span class="le-pill-add">' + marker + '</span>'
+      + '</div>';
+  }).join('');
+}
+
+function lePillClick(id){
+  // If already placed → clicking again removes it from the canvas
+  if (le_state.tileOrder.indexOf(id) > -1){
+    leRemove(id);
+    return;
+  }
+  // Otherwise add it at its default size in the first free spot
+  var defSz = DEF_TILE_SIZES[id] || {c:2,r:1};
+  var spot = leFindFreeSpot(defSz.c, defSz.r, null);
+  if (!spot){ toast('No room — make space first', 'err'); return; }
+  le_state.tileOrder.push(id);
+  le_state.tilePositions[id] = {col:spot.col, row:spot.row};
+  renderLeRail();
+  renderLeCanvas();
+}
+
+function leFindFreeSpot(cs, rs, excludeId){
+  var occupied = {};
+  le_state.tileOrder.forEach(function(id){
+    if (id === excludeId) return;
+    var p = le_state.tilePositions[id];
+    if (!p) return;
+    var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+    for (var dc = 0; dc < sz.c; dc++){
+      for (var dr = 0; dr < sz.r; dr++){
+        occupied[(p.col+dc) + ',' + (p.row+dr)] = true;
+      }
+    }
+  });
+  for (var r = 1; r <= 30; r++){
+    for (var c = 1; c <= 4 - cs + 1; c++){
+      var fits = true;
+      for (var dc = 0; dc < cs; dc++){
+        for (var dr = 0; dr < rs; dr++){
+          if (occupied[(c+dc) + ',' + (r+dr)]){ fits = false; break; }
+        }
+        if (!fits) break;
+      }
+      if (fits) return {col:c, row:r};
+    }
+  }
+  return null;
+}
+
+function leSpotIsFree(col, row, cs, rs, excludeId){
+  if (col < 1 || col + cs - 1 > 4) return false;
+  if (row < 1) return false;
+  var occupied = {};
+  le_state.tileOrder.forEach(function(id){
+    if (id === excludeId) return;
+    var p = le_state.tilePositions[id];
+    if (!p) return;
+    var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+    for (var dc = 0; dc < sz.c; dc++){
+      for (var dr = 0; dr < sz.r; dr++){
+        occupied[(p.col+dc) + ',' + (p.row+dr)] = true;
+      }
+    }
+  });
+  for (var dc = 0; dc < cs; dc++){
+    for (var dr = 0; dr < rs; dr++){
+      if (occupied[(col+dc) + ',' + (row+dr)]) return false;
+    }
+  }
+  return true;
+}
+
+function renderLeCanvas(){
+  var ICON_MAP = {
+    clock:'w-clock', schedule:'w-schedule', tasks:'w-todo', notes:'w-notes',
+    links:'w-link', weather:'w-weather', quote:'w-quote', timer:'w-timer',
+    countdowns:'w-countdown', search:'w-search', gapps:'w-apps', spotify:'w-music',
+    stocks:'w-stock', lunch:'w-lunch', scores:'w-chart',
+    rowbank:'w-rowoars', rowapprovals:'w-rowoars', reminders:'w-timer'
+  };
+  var canvas = document.getElementById('le-canvas');
+  canvas.innerHTML = le_state.tileOrder.map(function(id){
+    var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+    var pos = le_state.tilePositions[id] || {col:1, row:1};
+    var name = id;
+    for (var i = 0; i < ALL_WIDGETS.length; i++){
+      if (ALL_WIDGETS[i].id === id){ name = ALL_WIDGETS[i].name; break; }
+    }
+    var icoSym = ICON_MAP[id] || 'w-apps';
+    var isSel = id === le_selectedId;
+    var toolbar = '';
+    if (isSel){
+      toolbar = '<div class="le-toolbar">'
+        + '<button class="le-tb-btn" onclick="event.stopPropagation();toggleLeSizePicker(\'' + id + '\')">Size</button>'
+        + '<button class="le-tb-btn danger" onclick="event.stopPropagation();leRemove(\'' + id + '\')">&#128465;</button>'
+        + '</div>';
+    }
+    return '<div class="le-tile' + (isSel ? ' selected' : '') + '" id="le-tile-' + id + '" '
+      + 'data-id="' + id + '" '
+      + 'style="grid-column:' + pos.col + ' / span ' + sz.c + ';grid-row:' + pos.row + ' / span ' + sz.r + ';" '
+      + 'onclick="event.stopPropagation();selectLeTile(\'' + id + '\')" '
+      + 'draggable="true">'
+      + toolbar
+      + '<svg class="le-tile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use href="#' + icoSym + '"/></svg>'
+      + '<div class="le-tile-name">' + esc(name) + '</div>'
+      + '<div class="le-tile-size">' + sz.c + 'x' + sz.r + '</div>'
+      + '</div>';
+  }).join('');
+  canvas.onclick = function(){
+    le_selectedId = null;
+    renderLeCanvas();
+  };
+  attachLeDragHandlers();
+}
+
+function selectLeTile(id){
+  le_selectedId = id;
+  renderLeCanvas();
+}
+
+function leRemove(id){
+  le_state.tileOrder = le_state.tileOrder.filter(function(x){ return x !== id; });
+  delete le_state.tilePositions[id];
+  if (le_selectedId === id) le_selectedId = null;
+  renderLeRail();
+  renderLeCanvas();
+}
+
+function toggleLeSizePicker(id){
+  var existing = document.getElementById('le-size-pop');
+  if (existing){ existing.remove(); return; }
+  var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+  var cur = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+  var pos = le_state.tilePositions[id];
+  var html = '<div class="le-size-pop-title">Pick a size</div><div class="le-size-grid">';
+  LE_SIZES.forEach(function(s){
+    var fits = leSpotIsFree(pos.col, pos.row, s.c, s.r, id);
+    var sel = (s.c === cur.c && s.r === cur.r) ? ' sel' : '';
+    var cls = fits ? '' : ' disabled';
+    var click = fits ? 'onclick="leResize(\'' + id + '\',' + s.c + ',' + s.r + ')"' : '';
+    html += '<div class="le-size-cell' + sel + cls + '" ' + click + '>' + s.c + 'x' + s.r + '</div>';
+  });
+  html += '</div>';
+  var pop = document.createElement('div');
+  pop.id = 'le-size-pop';
+  pop.className = 'le-size-pop';
+  pop.innerHTML = html;
+  pop.onclick = function(e){ e.stopPropagation(); };
+  var tile = document.getElementById('le-tile-' + id);
+  if (tile) tile.appendChild(pop);
+}
+
+function leResize(id, cols, rows){
+  if (!le_state.tileSizes) le_state.tileSizes = {};
+  le_state.tileSizes[id] = {c:cols, r:rows};
+  var pop = document.getElementById('le-size-pop');
+  if (pop) pop.remove();
+  renderLeCanvas();
+}
+
+// Auto-scroll the canvas-wrap when the cursor is near its top/bottom edge
+// during a drag. Mirrors the page-level _dragScroll pattern.
+var _leScrollRaf = null;
+function _leDragScroll(e){
+  var wrap = document.querySelector('.le-canvas-wrap');
+  if (!wrap) return;
+  var rect = wrap.getBoundingClientRect();
+  var zone = 70;            // hot-zone size at top/bottom of canvas
+  var y = e.clientY;
+  if (_leScrollRaf) cancelAnimationFrame(_leScrollRaf);
+  if (y < rect.top + zone){
+    var sUp = Math.max(4, Math.round((rect.top + zone - y) / zone * 14));
+    (function tick(){ _leScrollRaf = requestAnimationFrame(function(){ wrap.scrollTop -= sUp; tick(); }); })();
+  } else if (y > rect.bottom - zone){
+    var sDn = Math.max(4, Math.round((y - (rect.bottom - zone)) / zone * 14));
+    (function tick(){ _leScrollRaf = requestAnimationFrame(function(){ wrap.scrollTop += sDn; tick(); }); })();
+  }
+}
+function _leStopDragScroll(){
+  if (_leScrollRaf){ cancelAnimationFrame(_leScrollRaf); _leScrollRaf = null; }
+}
+
+function attachLeDragHandlers(){
+  var canvas = document.getElementById('le-canvas');
+  var tiles = canvas.querySelectorAll('.le-tile');
+
+  tiles.forEach(function(tile){
+    tile.addEventListener('dragstart', function(e){
+      le_dragId = tile.dataset.id;
+      tile.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', le_dragId);
+    });
+    tile.addEventListener('dragend', function(){
+      tile.classList.remove('dragging');
+      var ov = document.getElementById('le-overlay');
+      if (ov) ov.remove();
+      le_dragId = null;
+      _leStopDragScroll();
+    });
+  });
+
+  canvas.addEventListener('dragover', function(e){
+    if (!le_dragId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    // Drive auto-scroll based on cursor position relative to canvas-wrap
+    _leDragScroll(e);
+
+    var rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    var actualCellW = (rect.width + 10) / 4;
+    var cellH = 130;
+    var col = Math.floor(x / actualCellW) + 1;
+    var row = Math.floor(y / cellH) + 1;
+    if (col < 1) col = 1;
+    if (col > 4) col = 4;
+    if (row < 1) row = 1;
+
+    var defSz = le_dragId.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[le_dragId];
+    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[le_dragId] || {});
+    if (col + sz.c - 1 > 4) col = 4 - sz.c + 1;
+    var fits = leSpotIsFree(col, row, sz.c, sz.r, le_dragId);
+
+    var ov = document.getElementById('le-overlay');
+    if (!ov){
+      ov = document.createElement('div');
+      ov.id = 'le-overlay';
+      ov.className = 'le-cell-overlay';
+      canvas.appendChild(ov);
+    }
+    ov.className = 'le-cell-overlay ' + (fits ? 'valid' : 'invalid');
+    ov.style.gridColumn = col + ' / span ' + sz.c;
+    ov.style.gridRow = row + ' / span ' + sz.r;
+    ov.dataset.col = col;
+    ov.dataset.row = row;
+    ov.dataset.fits = fits ? '1' : '0';
+  });
+
+  canvas.addEventListener('drop', function(e){
+    e.preventDefault();
+    _leStopDragScroll();
+    if (!le_dragId) return;
+    var ov = document.getElementById('le-overlay');
+    if (!ov || ov.dataset.fits !== '1'){
+      if (ov) ov.remove();
+      return;
+    }
+    le_state.tilePositions[le_dragId] = {col: parseInt(ov.dataset.col,10), row: parseInt(ov.dataset.row,10)};
+    if (ov) ov.remove();
+    renderLeCanvas();
+  });
+}
+
+function resetLayout(){
+  if (!confirm('Reset layout to defaults? You can still cancel by closing without saving.')) return;
+  le_state.tileOrder = ['clock','schedule','tasks','notes','links'];
+  le_state.tileSizes = {};
+  le_state.tilePositions = {};
+  le_state.tileOrder.forEach(function(id){
+    var defSz = DEF_TILE_SIZES[id] || {c:2,r:1};
+    var spot = leFindFreeSpot(defSz.c, defSz.r, null);
+    if (spot) le_state.tilePositions[id] = {col:spot.col, row:spot.row};
+  });
+  le_selectedId = null;
+  renderLeRail();
+  renderLeCanvas();
+}
+
+function saveLayout(){
+  var cfg = LE_MODES[le_mode];
+  prefs[cfg.orderKey] = le_state.tileOrder.slice();
+  prefs[cfg.sizesKey] = Object.assign({}, le_state.tileSizes);
+  prefs[cfg.positionsKey] = Object.assign({}, le_state.tilePositions);
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+
+  // Re-render whichever tab we just edited
+  var fn = window[cfg.rerenderFn];
+  if (typeof fn === 'function'){
+    try { fn(); } catch(e){ console.error('Re-render failed:', e); }
+  }
+
+  closeLayoutEditor();
+  toast('Layout saved', 'inf');
+}
+</script>

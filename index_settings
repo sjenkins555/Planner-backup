@@ -33,7 +33,11 @@
 
 // Merge user-saved prefs with DEF_PREFS so missing keys fall back cleanly.
 function mergePrefs(p){
-  return Object.assign({}, DEF_PREFS, p);
+  var merged = Object.assign({}, DEF_PREFS, p);
+  if (!merged.tilePositions) merged.tilePositions = {};
+  if (!merged.teacherTilePositions) merged.teacherTilePositions = {};
+  if (!merged.adminTilePositions) merged.adminTilePositions = {};
+  return merged;
 }
 
 // Apply every pref to the page. Called once on boot and again after
@@ -575,3 +579,4 @@ function flipDelCustomCol(colId){
 }
 
 </script>
+

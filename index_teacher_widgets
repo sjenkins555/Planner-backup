@@ -62,12 +62,13 @@ function buildTeacherDashboard(){
     tpush:  {fn:renderTPushWidget,     title:'Push Tasks',      svg:'#w-push',       defC:2, defR:2},
     talink: {fn:renderTLinkWidget,     title:'Assign Links',    svg:'#w-assignlink', defC:2, defR:2},
     tembed: {fn:renderTEmbedWidget,    title:'Embed Documents', svg:'#w-embed',      defC:4, defR:2},
-    trem:   {fn:renderTReminderWidget, title:'Send Reminder',   svg:'#w-timer',      defC:2, defR:2}
+    trem:         {fn:renderTReminderWidget,     title:'Send Reminder',   svg:'#w-timer',   defC:2, defR:2},
+    rowapprovals: {fn:renderTRowApprovalsWidget, title:'ROW Approvals',   svg:'#w-rowoars', defC:2, defR:2}
   };
 
   // Reconcile saved order with the canonical default — drop unknown IDs,
   // append any new IDs that weren't saved before.
-  var defaultOrder = ['tview','tgrp','tpush','talink','tembed','trem'];
+  var defaultOrder = ['tview','tgrp','tpush','talink','tembed','trem','rowapprovals'];
   if (!prefs.teacherTileOrder || !prefs.teacherTileOrder.length){
     prefs.teacherTileOrder = defaultOrder.slice();
   } else {
@@ -76,15 +77,72 @@ function buildTeacherDashboard(){
     prefs.teacherTileOrder = saved;
   }
   if (!prefs.teacherTileSizes) prefs.teacherTileSizes = {};
+  if (!prefs.teacherTilePositions) prefs.teacherTilePositions = {};
 
-  // Empty grid first
-  panel('t-dash').innerHTML = '<div class="tile-grid" id="t-tile-grid" style="grid-auto-rows:minmax(180px,auto);"></div>';
+  // Register catalog so the layout editor can list teacher widgets in its rail
+  window.TEACHER_WIDGETS = Object.keys(tileDefs).map(function(k){ return {id:k, name:tileDefs[k].title}; });
+  Object.keys(tileDefs).forEach(function(k){ if (typeof DEF_TILE_SIZES === 'object' && !DEF_TILE_SIZES[k]) DEF_TILE_SIZES[k] = {c:tileDefs[k].defC, r:tileDefs[k].defR}; });
+
+  // Render the panel shell with a Customize Layout button above the grid
+  panel('t-dash').innerHTML = '<div style="display:flex;justify-content:flex-end;padding:0 0 12px;"><button class="btn btn-primary btn-sm" onclick="openLayoutEditor(\'teacher\')"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-2px;"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M1 8h2M13 8h2M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"/></svg>Customize Layout</button></div><div class="tile-grid" id="t-tile-grid" style="grid-auto-rows:minmax(180px,auto);"></div>';
 
   // Pre-fetch students + groups so widgets like Push/Links/Embed can
   // populate their dropdowns immediately on first render.
   loadStuGroups(function(){
     var grid = document.getElementById('t-tile-grid');
     if (!grid) return;
+
+    // ─── Position handling ──────────────────────────────────────────
+    // Auto-assign positions to any widgets that don't have one yet.
+    // Walks the grid row-by-row finding the first empty slot that fits.
+    var positions = prefs.teacherTilePositions || {};
+    var occupied = {};
+    function isFree(c, r, cs, rs){
+      for (var dc = 0; dc < cs; dc++){
+        for (var dr = 0; dr < rs; dr++){
+          if (occupied[(c+dc) + ',' + (r+dr)]) return false;
+          if (c + dc > 4) return false;
+        }
+      }
+      return true;
+    }
+    function markOccupied(c, r, cs, rs){
+      for (var dc = 0; dc < cs; dc++){
+        for (var dr = 0; dr < rs; dr++){
+          occupied[(c+dc) + ',' + (r+dr)] = true;
+        }
+      }
+    }
+    // First pass: register positions for widgets that already have one
+    prefs.teacherTileOrder.forEach(function(id){
+      var pos = positions[id];
+      if (pos){
+        var t = tileDefs[id]; if (!t) return;
+        var sz = prefs.teacherTileSizes[id] || {c:t.defC, r:t.defR};
+        markOccupied(pos.col, pos.row, sz.c, sz.r);
+      }
+    });
+    // Second pass: assign positions to widgets that don't have one
+    var dirty = false;
+    prefs.teacherTileOrder.forEach(function(id){
+      if (positions[id]) return;
+      var t = tileDefs[id]; if (!t) return;
+      var sz = prefs.teacherTileSizes[id] || {c:t.defC, r:t.defR};
+      for (var r = 1; r <= 20; r++){
+        for (var c = 1; c <= 4 - sz.c + 1; c++){
+          if (isFree(c, r, sz.c, sz.r)){
+            positions[id] = {col:c, row:r};
+            markOccupied(c, r, sz.c, sz.r);
+            dirty = true;
+            c = 99; r = 99;
+          }
+        }
+      }
+    });
+    if (dirty){
+      prefs.teacherTilePositions = positions;
+      google.script.run.saveMyPrefs(JSON.stringify(prefs));
+    }
 
     grid.innerHTML = prefs.teacherTileOrder.map(function(id){
       var t = tileDefs[id];
@@ -93,9 +151,10 @@ function buildTeacherDashboard(){
       var colSpan = Math.min(Math.max(sz.c || t.defC, 1), 4);
       var rowSpan = Math.min(Math.max(sz.r || t.defR, 1), 3);
       var minH = (rowSpan * 180) + ((rowSpan - 1) * 14);
+      var pos = positions[id] || {col:1, row:1};
 
       return '<div class="tile" id="tile-' + id + '" draggable="true" data-tile="' + id + '" '
-        + 'style="grid-column:span ' + colSpan + ';grid-row:span ' + rowSpan + ';min-height:' + minH + 'px;">'
+        + 'style="grid-column:' + pos.col + ' / span ' + colSpan + ';grid-row:' + pos.row + ' / span ' + rowSpan + ';min-height:' + minH + 'px;">'
         + '<div class="card" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">'
         +   '<div class="card-top">'
         +     '<div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="' + t.svg + '"/></svg> ' + t.title + '</div>'
@@ -374,6 +433,33 @@ function renderTReminderWidget(){
     + '<div id="trem-det" style="margin-bottom:8px;"></div>'
     + '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="twSendReminder()">Send Reminder</button>';
   twRemRenderDet();
+}
+
+// ── ROW Approvals (teacher) ─────────────────────────────────────
+// Follows the pattern of the other teacher widget renderers: finds
+// its own container (#tw-rowapprovals) created by buildTeacherDashboard,
+// injects the card HTML directly, then triggers loadRowApprovals to
+// fetch the pending requests from the server.
+function renderTRowApprovalsWidget(){
+  var host = document.getElementById('tw-rowapprovals');
+  if (!host) return;
+
+  // Inject the card content. We're inside tw-rowapprovals which is already
+  // inside the tile's card div, so we render the card-top + body directly.
+  host.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 0 8px;border-bottom:1px solid var(--border);margin-bottom:8px;">'
+      + '<div style="font-size:11px;font-weight:600;color:var(--tx2);">Pending Requests</div>'
+      + '<div style="display:flex;gap:4px;">'
+        + '<button class="btn btn-ghost btn-sm" onclick="rowDebugUser()" title="DEBUG: Show my user info" style="background:#fbbf24;color:#000;font-size:11px;padding:2px 6px;">👤</button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="rowDebug()" title="DEBUG: Test server call" style="background:#fbbf24;color:#000;font-size:11px;padding:2px 6px;">🔍</button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="openRowHistoryModal()" title="View past approvals" style="font-size:11px;padding:2px 6px;">History</button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="loadRowApprovals()" title="Refresh" style="font-size:11px;padding:2px 6px;"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button>'
+      + '</div>'
+    + '</div>'
+    + '<div id="row-approvals-body" style="flex:1;min-height:0;overflow-y:auto;"><div class="empty"><p style="font-size:12px;color:var(--tx3);">Loading requests...</p></div></div>';
+
+  // Now that #row-approvals-body exists in the DOM, fire the data load
+  if (typeof loadRowApprovals === 'function') loadRowApprovals();
 }
 
 
@@ -994,5 +1080,7 @@ function loadStuGroups(cb){
     }).getStudentList();
   }).getStuGroupData();
 }
+
+</script>
 
 </script>

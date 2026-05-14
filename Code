@@ -1,6 +1,13 @@
 // ============================================================
 // Code.gs — Cedar Hollow Student Planner
-// Deploy: Execute as "Me"  |  Access: "Anyone with Google Account"
+// Deploy: Execute as "Anyone with a Google Account"  |  Access: "Anyone with Google Account"
+// ============================================================
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  CONFIG — edit these values if anything changes          ║
+// ║  This is the ONLY place IDs should live in this file.    ║
+// ╚══════════════════════════════════════════════════════════╝
+const SS_ID = '13hJWwIdnbtR01o0axK3tbj8G-VU22-KjOdrox0Kr5GY';
 // ============================================================
 
 function doGet(e) {
@@ -29,7 +36,7 @@ function onOpen() {
 }
 
 function repairSheets() {
-  const ss = SpreadsheetApp.openById('1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y');
+  const ss = SpreadsheetApp.openById(SS_ID);
   const required = allSheetDefs();
   const created = [];
   for (const [name, headers] of Object.entries(required)) {
@@ -83,7 +90,7 @@ function promptAddTeacher() {
   if (result.getSelectedButton() !== ui.Button.OK) return;
   const email = result.getResponseText().trim();
   if (!email||!email.includes('@')) { ui.alert('❌ Invalid email.'); return; }
-  const config = SpreadsheetApp.openById('1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y').getSheetByName('Config');
+  const config = SpreadsheetApp.openById(SS_ID).getSheetByName('Config');
   if (!config) { ui.alert('❌ Config sheet not found. Run First-Time Setup first.'); return; }
   const data = config.getDataRange().getValues();
   for (let i = 0; i < data.length; i++) {
@@ -115,7 +122,7 @@ function showUrlReminder() {
 }
 
 // ─── CORE HELPERS ─────────────────────────────────────────────
-function getSheet(name) { return SpreadsheetApp.openById('1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y').getSheetByName(name); }
+function getSheet(name) { return SpreadsheetApp.openById(SS_ID).getSheetByName(name); }
 
 // ─── LIBRARY CONNECTION CHECK ─────────────────────────────────
 // Calls into the Test Library to confirm the import is wired up.
@@ -289,7 +296,7 @@ function getMyScheduleWithBell(dateStr) { return Lib.getMyScheduleWithBell(dateS
 
 // ─── SETUP ────────────────────────────────────────────────────
 function setupSpreadsheet() {
-  const ss=SpreadsheetApp.openById('1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y');
+  const ss=SpreadsheetApp.openById(SS_ID);
   const defs=allSheetDefs();
   const firstRowData={
     'Config':[['Key','Value'],['TEACHER_EMAILS','yourname@yourdomain.edu'],['APP_NAME','Cedar Hollow Planner']]
@@ -334,4 +341,5 @@ function deleteReminder(id) { return Lib.deleteReminder(id); }
 function pushReminder(targetType, targetValue, title, body, triggerAt, subject) { return Lib.pushReminder(targetType, targetValue, title, body, triggerAt, subject); }
 function sendSchoolReminder(title, body, triggerAt) { return Lib.sendSchoolReminder(title, body, triggerAt); }
 function getMyCreatedReminders() { return Lib.getMyCreatedReminders(); }
+
 

@@ -49,6 +49,11 @@ var _editingBellId      = null; // which bell is open in the editor modal (null 
 var _schedCalDate       = null; // first day of currently-shown calendar month
 var _gradStudents       = []; // student list for the Graduate widget
 var _rowAdminAccounts   = []; // ROW account list for admin search/filter
+// Admin Embed Documents widget state
+var _aEdTab    = 'add';       // 'add' | 'list'
+var _aEdTarget = 'everyone';  // 'everyone' | 'all-students' | 'all-teachers' | 'grade' | 'group' | 'individual'
+var _aEdShowOpts = false;     // whether the sheet-options section is expanded
+var _aRemTab     = 'send';    // School-Wide Reminders widget: 'send' | 'sent'
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -69,21 +74,29 @@ function buildAdminPage(){
     astats:    {fn:renderAStatsWidget,    title:'Spreadsheet Health',     svg:'#w-apps',     defC:2, defR:1},
     arepair:   {fn:renderARepairWidget,   title:'Repair Sheets',          svg:'#w-admin',    defC:2, defR:1},
     alunch:    {fn:renderALunchWidget,    title:'Lunch Menu Import',      svg:'#w-embed',    defC:4, defR:2},
+    aembed:    {fn:renderAEmbedWidget,    title:'Embedded Documents',     svg:'#w-embed',    defC:3, defR:2},
     agrad:     {fn:renderAGradWidget,     title:'Graduate Students',      svg:'#w-student',  defC:2, defR:2},
     arow:      {fn:renderARowWidget,      title:'ROW Reward Accounts',    svg:'#w-student',  defC:4, defR:2},
     arem:      {fn:renderARemWidget,      title:'School-Wide Reminders',  svg:'#w-timer',    defC:2, defR:2},
-    aclean:    {fn:renderACleanWidget,    title:'Data Cleanup',           svg:'#w-admin',    defC:4, defR:2}
+    aclean:    {fn:renderACleanWidget,    title:'Data Cleanup',           svg:'#w-admin',    defC:4, defR:2},
+    aeggs:     {fn:renderAEggsWidget,     title:'Easter Eggs',            svg:'#w-quote',    defC:2, defR:2},
+    aterm:     {fn:renderATermWidget,     title:'Grading Periods',        svg:'#w-schedule', defC:2, defR:3},
+    arpt:      {fn:renderARptWidget,      title:'ROW Reports',            svg:'#w-chart',    defC:4, defR:3}
   };
 
   // Reconcile saved order with the canonical default order:
   // - Drop any tile IDs that no longer exist (older prefs)
   // - Append any new tiles that weren't in the saved order
-  var defaultOrder = ['abell','astats','arepair','aschedcal','alunch','agrad','arow','arem','aclean'];
+  var defaultOrder = ['abell','astats','arepair','aschedcal','alunch','aembed','agrad','arow','arem','aclean','aeggs','aterm'];
   if (!prefs.adminTileOrder || !prefs.adminTileOrder.length){
     prefs.adminTileOrder = defaultOrder.slice();
   } else {
     var saved = prefs.adminTileOrder.filter(function(id){ return tileDefs[id]; });
-    defaultOrder.forEach(function(id){ if (saved.indexOf(id) === -1) saved.push(id); });
+    // Auto-add new widgets, but never re-add ones the user removed on purpose.
+    var removed = prefs.adminTileRemoved || [];
+    defaultOrder.forEach(function(id){
+      if (saved.indexOf(id) === -1 && removed.indexOf(id) === -1) saved.push(id);
+    });
     prefs.adminTileOrder = saved;
   }
   if (!prefs.adminTileSizes) prefs.adminTileSizes = {};
@@ -159,12 +172,11 @@ function buildAdminPage(){
     var minH = (rowSpan * 180) + ((rowSpan - 1) * 14);
     var pos = positions[id] || {col:1, row:1};
 
-    return '<div class="tile" id="tile-' + id + '" draggable="true" data-tile="' + id + '" '
+    return '<div class="tile" id="tile-' + id + '" data-tile="' + id + '" '
       + 'style="grid-column:' + pos.col + ' / span ' + colSpan + ';grid-row:' + pos.row + ' / span ' + rowSpan + ';min-height:' + minH + 'px;">'
       + '<div class="card" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">'
       +   '<div class="card-top">'
       +     '<div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="' + t.svg + '"/></svg> ' + t.title + '</div>'
-      +     '<div class="tile-gear" onclick="openASzPicker(\'' + id + '\',event)" title="Resize"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4M3 3v4M13 13h-4M13 13v-4M3 13h4M3 13v-4M13 3h-4M13 3v4"/></svg></div>'
       +   '</div>'
       +   '<div class="t-widget-body t-widget-scroll" id="aw-' + id + '"><div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading...</div></div>'
       + '</div></div>';
@@ -183,8 +195,7 @@ function buildAdminPage(){
         console.error(e);
       }
     });
-    initDragDrop();
-  }, 50);
+    }, 50);
 }
 
 
@@ -346,29 +357,32 @@ function renderAGradWidget(){
     + '</div>';
 }
 
-// ROW Reward Accounts widget — search + accounts list + recent transactions.
-function renderARowWidget(){
-  var el = document.getElementById('aw-arow');
-  if (!el) return;
-  el.innerHTML = '<div style="padding:0 4px;">'
-    +   '<div class="row-admin-search" style="margin-bottom:8px;"><svg class="ui-ic row-admin-search-ico" viewBox="0 0 16 16"><use href="#i-search"/></svg>'
-    +     '<input class="finp" id="row-admin-search" placeholder="Search students..." oninput="filterRowAccounts()">'
-    +   '</div>'
-    +   '<button class="btn btn-ghost btn-sm" onclick="loadRowAdminAccounts()">\u21bb Load Accounts</button>'
-    +   '<div class="row-admin-acct-list" id="row-admin-acct-list" style="max-height:200px;"></div>'
-    +   '<div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;">'
-    +     '<div style="font-size:11px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Recent Activity</div>'
-    +     '<div id="row-admin-tx-list" style="max-height:160px;overflow-y:auto;font-size:11px;color:var(--tx3);"></div>'
-    +     '<button class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="loadRowAdminTransactions()">\u21bb Load Transactions</button>'
-    +   '</div>'
-    + '</div>';
-}
+// ROW Reward Accounts widget — moved to section 16, near the bottom of this file.
 
-// School-Wide Reminders widget — title/body/datetime inputs + Send button.
+// School-Wide Reminders widget — tabbed (Send New | Sent).
+// The Sent tab lists reminders you've sent, with a button to pull each
+// one back from everyone's planner.
 function renderARemWidget(){
   var el = document.getElementById('aw-arem');
   if (!el) return;
-  el.innerHTML = '<div style="font-size:11px;color:var(--tx3);line-height:1.5;margin-bottom:8px;padding:0 4px;">Sends to <strong>every student and teacher</strong>.</div>'
+
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+
+  var tabBar = uiTabBar([
+    {id:'send', label:'Send New'},
+    {id:'sent', label:'Sent'}
+  ], _aRemTab, 'aRemTab');
+
+  if (_aRemTab === 'sent'){
+    el.innerHTML = tabBar + '<div id="arem-sent-list" style="padding:0 4px;"><div style="color:var(--tx3);font-size:12px;padding:12px;text-align:center;">Loading...</div></div>';
+    aRemLoadSent();
+    return;
+  }
+
+  el.innerHTML = tabBar
+    + '<div style="font-size:11px;color:var(--tx3);line-height:1.5;margin-bottom:8px;padding:0 4px;">Sends to <strong>every student and teacher</strong>.</div>'
     + '<div style="padding:0 4px;">'
     +   '<input class="finp" id="adm-rem-title" placeholder="\u2014Title *\u2014" style="margin-bottom:6px;" maxlength="100">'
     +   '<textarea class="fta" id="adm-rem-body" placeholder="\u2014Details (optional)\u2014" style="min-height:48px;margin-bottom:6px;" maxlength="300"></textarea>'
@@ -376,6 +390,114 @@ function renderARemWidget(){
     +   '<button class="btn btn-primary btn-sm" onclick="doSendSchoolReminder()">\u{1F4E3} Send to School</button>'
     +   '<div id="adm-rem-result" style="margin-top:8px;"></div>'
     + '</div>';
+}
+
+// Switch tabs on the reminders widget.
+function aRemTab(t){ _aRemTab = t; renderARemWidget(); }
+
+// Load reminders this account has PUSHED to other people. Self-reminders
+// are excluded — those belong in your own Reminders widget.
+// Every pushed reminder in the school, newest first.
+function aRemLoadSent(){
+  google.script.run.withSuccessHandler(function(r){
+    var el = document.getElementById('arem-sent-list');
+    if (!el) return;
+    if (!r || !r.success){
+      el.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((r && r.error) || 'Could not load') + '</div>';
+      return;
+    }
+    var list = r.reminders || [];
+    if (!list.length){
+      el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No reminders sent yet.</div>';
+      return;
+    }
+    el.innerHTML = '<div style="font-size:10px;color:var(--tx4);margin-bottom:6px;">' + list.length + ' reminder' + (list.length !== 1 ? 's' : '') + ' school-wide</div>'
+      + list.map(function(rm){
+      var who;
+      if (rm.assignedTo === 'all')              who = (rm.source === 'admin') ? 'School-wide' : 'All students';
+      else if (rm.assignedTo.indexOf('@') > -1) who = rm.assignedTo.split('@')[0];
+      else                                       who = rm.assignedTo;
+
+      var when = '';
+      if (rm.triggerAt){
+        try {
+          when = (typeof fmtDate === 'function') ? fmtDate(rm.triggerAt.slice(0,10)) : rm.triggerAt.slice(0,10);
+          if (new Date(rm.triggerAt) > new Date()) when = 'Scheduled ' + when;
+        } catch(e){}
+      }
+
+      return '<div id="arem-row-' + esc(rm.id) + '" style="background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;">'
+        + '<div style="font-size:12px;font-weight:600;color:var(--tx);margin-bottom:2px;">' + esc(rm.title) + '</div>'
+        + '<div style="font-size:10px;color:var(--tx4);margin-bottom:7px;">' + esc(who) + (when ? ' &middot; ' + esc(when) : '') + ' &middot; by ' + esc(rm.createdByName) + '</div>'
+        + '<div style="display:flex;gap:6px;">'
+        +   '<button onclick="aRemEdit(\'' + esc(rm.id) + '\')" style="flex:1;padding:5px 8px;background:#475569;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>'
+        +   '<button onclick="aRemDelete(\'' + esc(rm.id) + '\')" style="flex:1;padding:5px 8px;background:#dc2626;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Remove for everyone</button>'
+        + '</div>'
+        + '<div id="arem-edit-' + esc(rm.id) + '"></div>'
+        + '</div>';
+    }).join('');
+    window._aRemCache = list;
+  }).withFailureHandler(function(e){
+    var el = document.getElementById('arem-sent-list');
+    if (el) el.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((e && e.message) || 'Could not load') + '</div>';
+  }).adminGetAllSentReminders();
+}
+
+// Expand an inline edit form under a reminder row.
+function aRemEdit(id){
+  var box = document.getElementById('arem-edit-' + id);
+  if (!box) return;
+  if (box.innerHTML){ box.innerHTML = ''; return; }
+
+  var rm = null;
+  var cache = window._aRemCache || [];
+  for (var i = 0; i < cache.length; i++){ if (cache[i].id === id){ rm = cache[i]; break; } }
+  if (!rm) return;
+
+  var localWhen = '';
+  if (rm.triggerAt){
+    try {
+      var d = new Date(rm.triggerAt);
+      localWhen = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0')
+        + 'T' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    } catch(e){}
+  }
+
+  box.innerHTML = '<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;">'
+    + '<input class="finp" id="arem-e-title-' + id + '" value="' + esc(rm.title) + '" style="margin-bottom:5px;font-size:12px;" maxlength="100">'
+    + '<textarea class="fta" id="arem-e-body-' + id + '" style="min-height:44px;margin-bottom:5px;font-size:12px;" maxlength="300">' + esc(rm.body) + '</textarea>'
+    + '<input type="datetime-local" class="finp" id="arem-e-when-' + id + '" value="' + localWhen + '" style="margin-bottom:6px;width:100%;font-size:12px;">'
+    + '<div style="display:flex;gap:6px;">'
+    +   '<button onclick="aRemEdit(\'' + id + '\')" style="flex:1;padding:5px 8px;background:transparent;color:var(--tx3);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit;">Cancel</button>'
+    +   '<button onclick="aRemSaveEdit(\'' + id + '\')" style="flex:1;padding:5px 8px;background:#4f46e5;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Save changes</button>'
+    + '</div></div>';
+}
+
+function aRemSaveEdit(id){
+  var title = ((document.getElementById('arem-e-title-' + id) || {}).value || '').trim();
+  var body  = ((document.getElementById('arem-e-body-'  + id) || {}).value || '').trim();
+  var when  =  (document.getElementById('arem-e-when-'  + id) || {}).value || '';
+  if (!title){ toast('Title required', 'err'); return; }
+  var iso = when ? new Date(when).toISOString() : '';
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){ toast('Reminder updated', 'ok'); aRemLoadSent(); }
+    else toast((r && r.error) || 'Could not save', 'err');
+  }).withFailureHandler(function(e){
+    toast((e && e.message) || 'Could not save', 'err');
+  }).adminUpdateReminder(id, title, body, iso);
+}
+
+function aRemDelete(id){
+  if (!confirm('Remove this reminder for everyone?\n\nIt will disappear from every student and teacher\'s planner.')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){
+      toast('Reminder removed', 'inf');
+      aRemLoadSent();
+      if (typeof loadReminders === 'function') loadReminders();
+    } else toast((r && r.error) || 'Could not remove', 'err');
+  }).withFailureHandler(function(e){
+    toast((e && e.message) || 'Could not remove', 'err');
+  }).deleteReminder(id);
 }
 
 // Data Cleanup widget — three age-threshold inputs + Run Cleanup button.
@@ -395,6 +517,596 @@ function renderACleanWidget(){
     +   '<div id="cleanup-result" style="margin-top:8px;"></div></div>';
 }
 
+// Admin Embed Documents — tabbed (Embed New | Current Docs)
+function renderAEmbedWidget(){
+  var el = document.getElementById('aw-aembed');
+  if (!el) return;
+
+  var tabBar = '<div class="t-mini-tabs" style="margin-bottom:8px;">'
+    + '<button class="t-mini-tab ' + (_aEdTab === 'add'  ? 'active' : '') + '" onclick="aEdTab(\'add\')">Embed New</button>'
+    + '<button class="t-mini-tab ' + (_aEdTab === 'list' ? 'active' : '') + '" onclick="aEdTab(\'list\')">Current Docs</button>'
+    + '</div>';
+
+  if (_aEdTab === 'list'){
+    el.innerHTML = tabBar + '<div id="aed-list" style="padding:0 4px;"><div style="color:var(--tx3);font-size:12px;padding:12px;text-align:center;">Loading...</div></div>';
+    aEdLoadList();
+    return;
+  }
+
+  // ── Embed New form ──
+  el.innerHTML = tabBar
+    + '<div style="padding:0 4px;">'
+    +   '<input class="finp" id="aed-title" placeholder="—Title *—" style="margin-bottom:6px;">'
+    +   '<input class="finp" id="aed-url"   placeholder="—Google Doc/Sheet/Slides/Form URL *—" style="margin-bottom:8px;" oninput="aEdUrlTypeHint()">'
+    +   '<div id="aed-type-hint" style="font-size:10px;color:var(--tx3);margin-bottom:8px;min-height:14px;"></div>'
+
+    +   '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Assign To</div>'
+    +   '<div class="target-row" style="flex-wrap:wrap;gap:4px;">'
+    +     '<div class="topt sel" id="aeda-everyone"     onclick="aEdSetTarget(\'everyone\')">Everyone</div>'
+    +     '<div class="topt"     id="aeda-all-students" onclick="aEdSetTarget(\'all-students\')">All Students</div>'
+    +     '<div class="topt"     id="aeda-all-teachers" onclick="aEdSetTarget(\'all-teachers\')">All Teachers</div>'
+    +     '<div class="topt"     id="aeda-grade"        onclick="aEdSetTarget(\'grade\')">Grade</div>'
+    +     '<div class="topt"     id="aeda-group"        onclick="aEdSetTarget(\'group\')">Group</div>'
+    +     '<div class="topt"     id="aeda-individual"   onclick="aEdSetTarget(\'individual\')">One Person</div>'
+    +   '</div>'
+    +   '<div id="aeda-det" style="margin:6px 0 10px;"></div>'
+
+    +   '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--tx2);margin-bottom:10px;cursor:pointer;">'
+    +     '<input type="checkbox" id="aed-forced" style="margin:0;">'
+    +     '<span>Auto-add to user\'s home (they can still remove it)</span>'
+    +   '</label>'
+
+    +   '<div id="aed-sheet-opts-wrap" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-bottom:10px;">'
+    +     '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Sheet Options (optional)</div>'
+    +     '<input class="finp" id="aed-opt-gid"   placeholder="—Tab gid (e.g., 0)—" style="margin-bottom:5px;font-size:12px;">'
+    +     '<input class="finp" id="aed-opt-range" placeholder="—Range (e.g., A1:E50)—" style="margin-bottom:5px;font-size:12px;">'
+    +     '<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--tx3);">'
+    +       '<input type="checkbox" id="aed-opt-noheaders" style="margin:0;"> Hide row/column headers'
+    +     '</label>'
+    +   '</div>'
+
+    +   '<button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="aEdCreate()">Embed Document</button>'
+    + '</div>';
+
+  aEdRenderDet();
+  aEdUrlTypeHint();
+}
+
+// ── EASTER EGGS WIDGET ──────────────────────────────────────────
+// School-wide toggles plus instructions for triggering each egg.
+function renderAEggsWidget(){
+  var el = document.getElementById('aw-aeggs');
+  if (!el) return;
+  el.innerHTML = '<div style="padding:0 4px;font-size:11px;color:var(--tx3);margin-bottom:8px;line-height:1.5;">Applies to <strong>everyone</strong>. Changes reach other people the next time they load the planner.</div>'
+    + '<div id="aeggs-body" style="padding:0 4px;"><div style="color:var(--tx4);font-size:12px;">Loading...</div></div>';
+  aEggsLoad();
+}
+
+function aEggsLoad(){
+  google.script.run.withSuccessHandler(function(r){
+    var body = document.getElementById('aeggs-body');
+    if (!body) return;
+    var f = (r && r.flags) || {};
+    var emoji   = f.EGG_EMOJI   !== false;   // default ON
+    var science = f.EGG_SCIENCE !== false;
+
+    function card(key, on, name, trigger, effect){
+      return '<div class="aeggs-card" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:11px 12px;margin-bottom:8px;">'
+        + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
+        +   '<div style="flex:1;font-size:13px;font-weight:700;color:var(--tx);">' + name + '</div>'
+        +   '<span style="font-size:10px;font-weight:800;padding:2px 8px;border-radius:99px;background:' + (on ? 'rgba(34,197,94,.18)' : 'rgba(148,163,184,.18)') + ';color:' + (on ? '#22c55e' : 'var(--tx2)') + ';">' + (on ? 'ON' : 'OFF') + '</span>'
+        + '</div>'
+        + '<div style="font-size:12px;line-height:1.65;margin-bottom:9px;">'
+        +   '<div style="margin-bottom:5px;"><span class="aeggs-lbl">Trigger</span> <span class="aeggs-txt">' + trigger + '</span></div>'
+        +   '<div><span class="aeggs-lbl">Effect</span> <span class="aeggs-txt">' + effect + '</span></div>'
+        + '</div>'
+        + '<button onclick="aEggsToggle(\'' + key + '\',' + (on ? 'false' : 'true') + ')" '
+        +   'style="width:100%;padding:5px 10px;background:' + (on ? '#475569' : '#4f46e5') + ';color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">'
+        +   (on ? 'Turn off' : 'Turn on') + '</button>'
+        + '</div>';
+    }
+
+    body.innerHTML =
+        card('EGG_EMOJI', emoji, 'Emoji Mode',
+             'Add a task titled exactly <code style="color:var(--a2);">put emojis everywhere</code>',
+             'Emojis replace icons across the whole app. Completing the task turns it back off.')
+      + card('EGG_SCIENCE', science, 'Science Mode',
+             'Add a task titled <code style="color:var(--a2);">science is awesome</code>, <code style="color:var(--a2);">science is the best</code>, or <code style="color:var(--a2);">science rules</code>',
+             'Banner plus raining science-teacher faces for about 12 seconds.');
+  }).withFailureHandler(function(e){
+    var body = document.getElementById('aeggs-body');
+    if (body) body.innerHTML = '<div style="color:#f87171;font-size:12px;">' + esc((e && e.message) || 'Could not load') + '</div>';
+  }).getAppFlags();
+}
+
+function aEggsToggle(key, on){
+  google.script.run.withSuccessHandler(function(r){
+    if (r && r.success){
+      toast('Saved', 'ok');
+      if (typeof APP_FLAGS === 'object') APP_FLAGS[key] = on;
+      aEggsLoad();
+    } else {
+      toast((r && r.error) || 'Could not save', 'err');
+    }
+  }).withFailureHandler(function(e){
+    toast((e && e.message) || 'Could not save', 'err');
+  }).setAppFlag(key, on);
+}
+// ── END EASTER EGGS WIDGET ──────────────────────────────────────
+
+// ── ROW REPORTS WIDGET ──────────────────────────────────────────
+// Three tabs over one server call. Widget shows a scannable summary;
+// Print shows every row under the same filters.
+var _aRptTab   = 'students';
+var _aRptGrade = 'all';
+var _aRptRange = null;
+var _aRptData  = null;
+var _aRptSortAsc = false;   // false = highest first (default)
+
+function aRptToggleSort(){ _aRptSortAsc = !_aRptSortAsc; aRptRender(); }
+
+// Reports use the email prefix, not the self-chosen display name.
+function rptWho(email){ return String(email || '').split('@')[0]; }
+
+function renderARptWidget(){
+  var el = document.getElementById('aw-arpt');
+  if (!el) return;
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+
+  loadGradingPeriods(function(){
+    var ranges = buildDateRanges();
+    if (!_aRptRange) _aRptRange = currentGradingPeriod() || ranges[0];
+
+    var opts = ranges.map(function(r){
+      return '<option value="' + esc(r.id) + '"' + (r.id === _aRptRange.id ? ' selected' : '') + '>' + esc(r.label) + '</option>';
+    }).join('');
+
+    el.innerHTML =
+        '<div style="display:flex;gap:6px;margin-bottom:8px;flex-shrink:0;">'
+      +   '<select class="fsel" id="arpt-range" onchange="aRptSetRange(this.value)" style="flex:1;font-size:12px;">' + opts + '</select>'
+      +   '<button onclick="aRptPrint()" style="padding:6px 12px;background:#475569;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Print</button>'
+      + '</div>'
+      + uiTabBar([
+          {id:'students', label:'Students'},
+          {id:'teachers', label:'Staff'},
+          {id:'grades',   label:'Grades'}
+        ], _aRptTab, 'aRptTab')
+      + '<div id="arpt-body" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"><div style="color:var(--tx2);font-size:12px;padding:14px;text-align:center;">Loading...</div></div>';
+
+    aRptLoad();
+  });
+}
+
+function aRptTab(t){ _aRptTab = t; renderARptWidget(); }
+
+function aRptSetRange(id){
+  var ranges = buildDateRanges();
+  for (var i = 0; i < ranges.length; i++){ if (ranges[i].id === id){ _aRptRange = ranges[i]; break; } }
+  _aRptData = null;
+  aRptLoad();
+}
+
+function aRptGradeSet(g){ _aRptGrade = g; aRptRender(); }
+
+function aRptLoad(){
+  var body = document.getElementById('arpt-body');
+  if (body) body.innerHTML = '<div style="color:var(--tx2);font-size:12px;padding:14px;text-align:center;">Loading report...</div>';
+  google.script.run.withSuccessHandler(function(r){
+    if (!r || !r.success){
+      if (body) body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((r && r.error) || 'Could not load') + '</div>';
+      return;
+    }
+    _aRptData = r;
+    aRptRender();
+  }).withFailureHandler(function(e){
+    if (body) body.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;">' + esc((e && e.message) || 'Server error') + '</div>';
+  }).getRowReport(_aRptRange.start, _aRptRange.end);
+}
+
+function aRptRender(){
+  var body = document.getElementById('arpt-body');
+  if (!body || !_aRptData) return;
+  var d = _aRptData;
+
+  var summary = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px;">'
+    + '<div style="flex:1;min-width:70px;background:var(--a5);border:1px solid var(--a4);border-radius:7px;padding:6px 9px;">'
+    +   '<div style="font-size:17px;font-weight:800;color:var(--a2);line-height:1.1;">' + d.totals.earned + '</div>'
+    +   '<div style="font-size:10px;color:var(--tx2);">ROWs given</div></div>'
+    + '<div style="flex:1;min-width:70px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:7px;padding:6px 9px;">'
+    +   '<div style="font-size:17px;font-weight:800;color:#f87171;line-height:1.1;">' + d.totals.studentsWithNone + '</div>'
+    +   '<div style="font-size:10px;color:var(--tx2);">with none</div></div>'
+    + '<div style="flex:1;min-width:70px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:7px;padding:6px 9px;">'
+    +   '<div style="font-size:17px;font-weight:800;color:var(--tx);line-height:1.1;">' + d.totals.studentsTotal + '</div>'
+    +   '<div style="font-size:10px;color:var(--tx2);">students</div></div>'
+    + '</div>';
+
+  body.innerHTML = summary + (
+      _aRptTab === 'teachers' ? aRptTeachersHTML(d, false)
+    : _aRptTab === 'grades'   ? aRptGradesHTML(d, false)
+    :                           aRptStudentsHTML(d, false)
+  );
+}
+
+// ── Section builders. print=true drops caps and adds grade headers. ──
+function aRptStudentsHTML(d, print){
+  // Sort: default high→low, toggled to low→high. Grade groups the print view.
+  function sortSeg(arr){
+    return arr.slice().sort(function(a, b){
+      var diff = _aRptSortAsc ? (a.earned - b.earned) : (b.earned - a.earned);
+      return diff || rptWho(a.email).localeCompare(rptWho(b.email));
+    });
+  }
+
+  function row(s, i){
+    var zero = s.earned === 0;
+    var shade = (i % 2 === 1) ? 'background:rgba(255,255,255,.045);' : '';
+    return '<div class="rpt-row" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid var(--border);' + shade + '">'
+      + '<div style="width:34px;text-align:center;font-size:12px;font-weight:600;color:var(--tx2);">' + (s.grade || '\u2014') + '</div>'
+      + '<div style="flex:1;min-width:0;font-size:14px;' + (zero ? 'color:#f87171;font-weight:700;' : 'color:var(--tx);font-weight:500;') + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(rptWho(s.email)) + '</div>'
+      + '<div style="width:52px;text-align:right;font-size:13px;font-weight:700;color:' + (zero ? '#f87171' : 'var(--a2)') + ';">' + s.earned + '</div>'
+      + '<div style="width:52px;text-align:right;font-size:12px;color:var(--tx2);">' + s.current + '</div>'
+      + '</div>';
+  }
+
+  var head = '<div style="display:flex;gap:10px;padding:0 10px 4px;font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--tx2);border-bottom:2px solid var(--a1);">'
+    + '<div style="width:34px;text-align:center;">Gr</div><div style="flex:1;">Student</div>'
+    + '<div style="width:52px;text-align:right;">Earned</div><div style="width:52px;text-align:right;">Balance</div></div>';
+
+  if (print){
+    var out = '';
+    ['6','7','8','other'].forEach(function(g){
+      var seg = sortSeg(d.students.filter(function(s){ return String(s.grade || 'other') === g; }));
+      if (!seg.length) return;
+      var none = seg.filter(function(s){ return s.earned === 0; }).length;
+      out += '<h3 class="rpt-h3">' + (g === 'other' ? 'Other' : g + 'th Grade')
+        + ' <span style="font-weight:400;font-size:12px;">(' + seg.length + ' students &middot; ' + none + ' with none)</span></h3>'
+        + head + seg.map(row).join('');
+    });
+    return out;
+  }
+
+  function gBtn(v, lbl){
+    var on = _aRptGrade === v;
+    return '<div onclick="aRptGradeSet(\'' + v + '\')" style="flex:1;text-align:center;padding:5px 4px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;border:1px solid ' + (on ? 'var(--a1)' : 'var(--border)') + ';background:' + (on ? 'var(--a3)' : 'transparent') + ';color:' + (on ? 'var(--a2)' : 'var(--tx2)') + ';">' + lbl + '</div>';
+  }
+
+  var list = sortSeg(d.students.filter(function(s){
+    return _aRptGrade === 'all' || String(s.grade || 'other') === _aRptGrade;
+  }));
+  var shown = list.slice(0, 40);
+
+  return '<div style="display:flex;gap:5px;margin-bottom:6px;">'
+    +   gBtn('all','All') + gBtn('6','6th') + gBtn('7','7th') + gBtn('8','8th') + '</div>'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">'
+    +   '<div style="flex:1;font-size:10px;color:var(--tx2);">Red = none this period</div>'
+    +   '<button onclick="aRptToggleSort()" style="padding:4px 10px;background:transparent;color:var(--a2);border:1px solid var(--a4);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">'
+    +     (_aRptSortAsc ? 'Lowest first \u2191' : 'Highest first \u2193') + '</button>'
+    + '</div>'
+    + head + shown.map(row).join('')
+    + (list.length > shown.length ? '<div style="font-size:11px;color:var(--tx2);padding:8px;text-align:center;">+' + (list.length - shown.length) + ' more \u2014 use Print for the full list</div>' : '');
+}
+
+function aRptTeachersHTML(d, print){
+  var head = '<div style="display:flex;gap:10px;padding:0 10px 4px;font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--tx2);border-bottom:2px solid var(--a1);">'
+    + '<div style="flex:1;">Staff</div><div style="width:56px;text-align:right;">Approved</div>'
+    + '<div style="width:52px;text-align:right;">Given</div><div style="width:44px;text-align:right;">Total</div>'
+    + '<div style="width:58px;text-align:right;">Students</div></div>';
+
+  return head + d.teachers.map(function(t, i){
+    var zero = t.total === 0;
+    var shade = (i % 2 === 1) ? 'background:rgba(255,255,255,.045);' : '';
+    return '<div class="rpt-row" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid var(--border);' + shade + '">'
+      + '<div style="flex:1;min-width:0;font-size:14px;font-weight:500;color:' + (zero ? 'var(--tx2)' : 'var(--tx)') + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(rptWho(t.email)) + '</div>'
+      + '<div style="width:56px;text-align:right;font-size:12px;color:var(--tx2);">' + t.approved + '</div>'
+      + '<div style="width:52px;text-align:right;font-size:12px;color:var(--tx2);">' + t.awarded + '</div>'
+      + '<div style="width:44px;text-align:right;font-size:13px;font-weight:700;color:' + (zero ? 'var(--tx2)' : 'var(--a2)') + ';">' + t.total + '</div>'
+      + '<div style="width:58px;text-align:right;font-size:12px;color:var(--tx2);">' + t.studentsReached + '</div>'
+      + '</div>';
+  }).join('')
+  + '<div style="font-size:10px;color:var(--tx2);padding:7px 10px;line-height:1.5;">'
+  +   '<strong>Approved</strong> = ROWs from student requests. <strong>Given</strong> = awarded directly. '
+  +   '<strong>Students</strong> = how many different students they reached.</div>';
+}
+
+function aRptGradesHTML(d, print){
+  return d.grades.map(function(g){
+    var pct = g.studentsTotal ? Math.round(g.studentsWithRows / g.studentsTotal * 100) : 0;
+    return '<div class="rpt-row" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:9px 11px;margin-bottom:6px;">'
+      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+      +   '<div style="flex:1;font-size:13px;font-weight:700;color:var(--tx);">' + (g.grade === 'other' ? 'Other' : g.grade + 'th Grade') + '</div>'
+      +   '<div style="font-size:17px;font-weight:800;color:var(--a2);">' + g.rows + '</div>'
+      + '</div>'
+      + '<div style="height:6px;background:rgba(255,255,255,.10);border-radius:99px;overflow:hidden;margin-bottom:5px;">'
+      +   '<div style="height:100%;width:' + pct + '%;background:var(--a1);"></div></div>'
+      + '<div style="font-size:11px;color:var(--tx2);">' + g.studentsWithRows + ' of ' + g.studentsTotal + ' students reached (' + pct + '%) &middot; <span style="color:#f87171;font-weight:600;">' + g.studentsWithNone + ' with none</span></div>'
+      + '</div>';
+  }).join('');
+}
+
+// Full-screen print view — every row under the current filters.
+function aRptPrint(){
+  if (!_aRptData){ toast('Report still loading', 'inf'); return; }
+  var d = _aRptData;
+  var old = document.getElementById('rpt-print');
+  if (old) old.remove();
+
+  var when = new Date().toLocaleDateString();
+  var ov = document.createElement('div');
+  ov.id = 'rpt-print';
+  ov.innerHTML =
+      '<div class="rpt-bar">'
+    +   '<button onclick="document.getElementById(\'rpt-print\').remove()" class="rpt-btn ghost">Close</button>'
+    +   '<div style="flex:1;"></div>'
+    +   '<button onclick="window.print()" class="rpt-btn">Print</button>'
+    + '</div>'
+    + '<div class="rpt-page">'
+    +   '<h1 class="rpt-h1">ROW Rewards Report</h1>'
+    +   '<div class="rpt-sub">' + esc(_aRptRange.label) + ' &middot; ' + esc(d.range.start) + ' to ' + esc(d.range.end) + ' &middot; generated ' + esc(when) + '</div>'
+    +   '<div class="rpt-sub" style="margin-bottom:18px;"><strong>' + d.totals.earned + '</strong> ROWs given &middot; <strong>' + d.totals.studentsWithNone + '</strong> of <strong>' + d.totals.studentsTotal + '</strong> students have none</div>'
+    +   '<h2 class="rpt-h2">Students</h2>' + aRptStudentsHTML(d, true)
+    +   '<h2 class="rpt-h2 rpt-break">Staff</h2>' + aRptTeachersHTML(d, true)
+    +   '<h2 class="rpt-h2 rpt-break">By Grade</h2>' + aRptGradesHTML(d, true)
+    + '</div>';
+  document.body.appendChild(ov);
+}
+// ── END ROW REPORTS WIDGET ──────────────────────────────────────
+
+// ── GRADING PERIODS WIDGET ──────────────────────────────────────
+// School-wide date ranges (quarters, trimesters, six-week terms —
+// whatever your building uses). Any report can filter by these.
+var _aTermDraft = null;
+
+function renderATermWidget(){
+  var el = document.getElementById('aw-aterm');
+  if (!el) return;
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+  el.innerHTML = '<div style="font-size:11px;color:var(--tx2);line-height:1.5;margin-bottom:8px;padding:0 4px;flex-shrink:0;">Set your grading periods once. Reports across the planner use these date ranges.</div>'
+    + '<div id="aterm-body" style="flex:1;min-height:0;overflow-y:auto;padding:0 4px;"><div style="color:var(--tx3);font-size:12px;">Loading...</div></div>';
+
+  google.script.run.withSuccessHandler(function(r){
+    _aTermDraft = ((r && r.periods) || []).slice();
+    if (typeof GRADING_PERIODS !== 'undefined'){ GRADING_PERIODS = _aTermDraft.slice(); _gpLoaded = true; }
+    renderATermRows();
+  }).withFailureHandler(function(e){
+    var b = document.getElementById('aterm-body');
+    if (b) b.innerHTML = '<div style="color:#f87171;font-size:12px;">' + esc((e && e.message) || 'Could not load') + '</div>';
+  }).getGradingPeriods();
+}
+
+function renderATermRows(){
+  var b = document.getElementById('aterm-body');
+  if (!b) return;
+  var list = _aTermDraft || [];
+
+  var rows = list.map(function(p, i){
+    return '<div style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;">'
+      + '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
+      +   '<input class="finp" value="' + esc(p.name) + '" oninput="aTermEdit(' + i + ',\'name\',this.value)" placeholder="Name (e.g. Quarter 1)" style="flex:1;font-size:12px;">'
+      +   '<button onclick="aTermRemove(' + i + ')" title="Remove" style="padding:4px 9px;background:#dc2626;color:#fff;border:none;border-radius:5px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">\u2715</button>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
+      +   '<div><div style="font-size:10px;color:var(--tx2);margin-bottom:2px;">STARTS</div><input type="date" class="finp" value="' + esc(p.start) + '" onchange="aTermEdit(' + i + ',\'start\',this.value)" style="width:100%;font-size:12px;"></div>'
+      +   '<div><div style="font-size:10px;color:var(--tx2);margin-bottom:2px;">ENDS</div><input type="date" class="finp" value="' + esc(p.end) + '" onchange="aTermEdit(' + i + ',\'end\',this.value)" style="width:100%;font-size:12px;"></div>'
+      + '</div></div>';
+  }).join('') || '<div style="color:var(--tx2);font-size:12px;padding:12px;text-align:center;">No grading periods yet. Add your first one below.</div>';
+
+  b.innerHTML = rows
+    + '<div style="display:flex;gap:6px;margin-top:8px;">'
+    +   '<button onclick="aTermAdd()" style="flex:1;padding:7px 10px;background:transparent;color:var(--a2);border:1px solid var(--a4);border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">+ Add Period</button>'
+    +   '<button onclick="aTermQuickFill()" style="flex:1;padding:7px 10px;background:transparent;color:var(--tx2);border:1px solid var(--border);border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Fill 4 Quarters</button>'
+    + '</div>'
+    + '<div id="aterm-msg" style="font-size:11px;min-height:14px;margin:7px 0;color:#f87171;"></div>'
+    + '<button id="aterm-save" onclick="aTermSave()" style="width:100%;padding:8px 10px;background:#4f46e5;color:#fff;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">Save Grading Periods</button>';
+}
+
+function aTermEdit(i, field, val){
+  if (!_aTermDraft || !_aTermDraft[i]) return;
+  _aTermDraft[i][field] = val;   // no re-render — keeps focus in the field
+}
+
+function aTermAdd(){
+  if (!_aTermDraft) _aTermDraft = [];
+  _aTermDraft.push({id:'gp-' + Date.now(), name:'', start:'', end:''});
+  renderATermRows();
+}
+
+function aTermRemove(i){
+  if (!_aTermDraft) return;
+  _aTermDraft.splice(i, 1);
+  renderATermRows();
+}
+
+// Scaffold four empty quarters so you're only filling in dates.
+function aTermQuickFill(){
+  if (_aTermDraft && _aTermDraft.length && !confirm('Replace the current list with four blank quarters?')) return;
+  var now = new Date();
+  var sy = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  _aTermDraft = [1,2,3,4].map(function(n){
+    return {id:'gp-' + Date.now() + '-' + n, name:'Quarter ' + n + ' (' + sy + '-' + String(sy+1).slice(2) + ')', start:'', end:''};
+  });
+  renderATermRows();
+}
+
+function aTermSave(){
+  var msg = document.getElementById('aterm-msg');
+  var btn = document.getElementById('aterm-save');
+  msg.style.color = '#f87171';
+
+  var list = _aTermDraft || [];
+  for (var i = 0; i < list.length; i++){
+    if (!String(list[i].name || '').trim()){ msg.textContent = 'Every period needs a name.'; return; }
+    if (!list[i].start || !list[i].end){ msg.textContent = 'Pick both dates for "' + list[i].name + '".'; return; }
+    if (list[i].end < list[i].start){ msg.textContent = '"' + list[i].name + '" ends before it starts.'; return; }
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  google.script.run.withSuccessHandler(function(r){
+    btn.disabled = false;
+    btn.textContent = 'Save Grading Periods';
+    if (r && r.success){
+      _aTermDraft = r.periods.slice();
+      if (typeof GRADING_PERIODS !== 'undefined'){ GRADING_PERIODS = r.periods.slice(); _gpLoaded = true; }
+      toast('Grading periods saved', 'ok');
+      renderATermRows();
+    } else {
+      msg.style.color = '#f87171';
+      msg.textContent = (r && r.error) || 'Could not save.';
+    }
+  }).withFailureHandler(function(e){
+    btn.disabled = false;
+    btn.textContent = 'Save Grading Periods';
+    msg.style.color = '#f87171';
+    msg.textContent = (e && e.message) || 'Server error.';
+  }).setGradingPeriods(JSON.stringify(list));
+}
+// ── END GRADING PERIODS WIDGET ──────────────────────────────────
+
+function aEdTab(t){ _aEdTab = t; renderAEmbedWidget(); }
+
+function aEdSetTarget(t){
+  _aEdTarget = t;
+  ['everyone','all-students','all-teachers','grade','group','individual'].forEach(function(x){
+    var el = document.getElementById('aeda-' + x);
+    if (el) el.classList.toggle('sel', x === t);
+  });
+  aEdRenderDet();
+}
+
+// Render the detail picker depending on target type
+function aEdRenderDet(){
+  var det = document.getElementById('aeda-det');
+  if (!det) return;
+  if (_aEdTarget === 'grade'){
+    var gOpts = '';
+    for (var gi = 1; gi <= 12; gi++){
+      var suffix = (gi === 1 ? 'st' : gi === 2 ? 'nd' : gi === 3 ? 'rd' : 'th');
+      gOpts += '<option value="' + gi + '">' + gi + suffix + ' Grade</option>';
+    }
+    det.innerHTML = '<select class="finp" id="aeda-grade-val" style="font-size:12px;">' + gOpts + '</select>'
+      + '<div style="font-size:10px;color:var(--tx4);margin-top:4px;">Targets whichever students are currently in that grade (auto-updates each August).</div>';
+  } else if (_aEdTarget === 'group'){
+    var opts = (groups || []).map(function(g){ return '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>'; }).join('');
+    det.innerHTML = '<select class="finp" id="aeda-group-val" style="font-size:12px;">'
+      + (opts || '<option value="">No groups defined</option>') + '</select>';
+  } else if (_aEdTarget === 'individual'){
+    var sopts = (students || []).map(function(s){ return '<option value="' + esc(s.email) + '">' + esc(s.name || s.email) + '</option>'; }).join('');
+    det.innerHTML = '<select class="finp" id="aeda-ind-val" style="font-size:12px;">'
+      + (sopts || '<option value="">No students yet</option>') + '</select>';
+  } else {
+    det.innerHTML = '';
+  }
+}
+
+// Show a small hint about the URL type + reveal sheet options when it's a Sheet
+function aEdUrlTypeHint(){
+  var url = (document.getElementById('aed-url') || {}).value || '';
+  var hint = document.getElementById('aed-type-hint');
+  var opts = document.getElementById('aed-sheet-opts-wrap');
+  var isSheet = url.indexOf('/spreadsheets/') > -1;
+  if (hint){
+    if (!url) hint.textContent = '';
+    else if (isSheet) hint.innerHTML = '&#128202; Google Sheet detected — see options below';
+    else if (url.indexOf('/document/d/') > -1) hint.innerHTML = '&#128196; Google Doc detected';
+    else if (url.indexOf('/presentation/') > -1) hint.innerHTML = '&#128250; Google Slides detected';
+    else if (url.indexOf('/forms/d/') > -1) hint.innerHTML = '&#128203; Google Form detected';
+    else hint.textContent = 'Unknown URL type — must be a Google doc URL';
+  }
+  if (opts) opts.style.display = isSheet ? 'block' : 'none';
+}
+
+function aEdCreate(){
+  var title = (document.getElementById('aed-title').value || '').trim();
+  var url   = (document.getElementById('aed-url').value   || '').trim();
+  if (!title || !url){ toast('Title and URL required', 'err'); return; }
+
+  // Detect doc type from URL
+  var docType = (typeof detectDocType === 'function') ? detectDocType(url) : 'doc';
+  var forced  = !!(document.getElementById('aed-forced') || {}).checked;
+
+  // Resolve target value
+  var tv = '';
+  if (_aEdTarget === 'grade'){
+    tv = (document.getElementById('aeda-grade-val') || {}).value || '';
+  } else if (_aEdTarget === 'group'){
+    tv = (document.getElementById('aeda-group-val') || {}).value || '';
+  } else if (_aEdTarget === 'individual'){
+    tv = (document.getElementById('aeda-ind-val') || {}).value || '';
+  }
+
+  // Build sheet options if this is a Sheet
+  var embedOptions = null;
+  if (docType === 'sheet'){
+    var gid   = ((document.getElementById('aed-opt-gid')   || {}).value || '').trim();
+    var range = ((document.getElementById('aed-opt-range') || {}).value || '').trim();
+    var noH   = !!(document.getElementById('aed-opt-noheaders') || {}).checked;
+    if (gid || range || noH){
+      embedOptions = {};
+      if (gid)   embedOptions.gid = gid;
+      if (range) embedOptions.range = range;
+      if (noH)   embedOptions.hideHeaders = true;
+    }
+  }
+
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){
+      toast('Embedded', 'ok');
+      document.getElementById('aed-title').value = '';
+      document.getElementById('aed-url').value   = '';
+      var f = document.getElementById('aed-forced'); if (f) f.checked = false;
+      aEdUrlTypeHint();
+    } else {
+      toast(r.error || 'Error', 'err');
+    }
+  }).adminCreateEmbeddedDoc(title, url, docType, _aEdTarget, tv, embedOptions ? JSON.stringify(embedOptions) : '', forced);
+}
+
+function aEdLoadList(){
+  google.script.run.withSuccessHandler(function(r){
+    var el = document.getElementById('aed-list');
+    if (!el) return;
+    if (!r.success || !r.docs || !r.docs.length){
+      el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No admin-pushed documents yet.</div>';
+      return;
+    }
+    el.innerHTML = r.docs.map(function(d){
+      // Friendly target label
+      var lbl;
+      if (d.assignedTo === 'everyone' || d.assignedTo === 'all')      lbl = 'Everyone';
+      else if (d.assignedTo === 'all-students') lbl = 'All Students';
+      else if (d.assignedTo === 'all-teachers') lbl = 'All Teachers';
+      else if (d.assignedTo.indexOf('grade:') === 0) {
+        var gn = d.assignedTo.slice(6);
+        var suf = (gn === '1' ? 'st' : gn === '2' ? 'nd' : gn === '3' ? 'rd' : 'th');
+        lbl = gn + suf + ' Grade';
+      }
+      else if (d.assignedTo.indexOf('@') > -1)  lbl = d.assignedTo.split('@')[0];
+      else lbl = d.assignedTo;
+
+      var forcedBadge = d.forced ? ' <span style="background:rgba(99,102,241,.2);color:#a5b4fc;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;text-transform:uppercase;">Forced</span>' : '';
+
+      return '<div style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:7px;padding:6px 8px;margin-bottom:4px;font-size:12px;">'
+        + '<div style="flex:1;min-width:0;">'
+        +   '<div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(d.title) + forcedBadge + '</div>'
+        +   '<div style="font-size:10px;color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(d.docType) + ' &middot; ' + esc(lbl) + '</div>'
+        + '</div>'
+        + '<button class="btn btn-danger btn-sm" onclick="aEdDel(\'' + esc(d.id) + '\')" style="padding:2px 6px;"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
+        + '</div>';
+    }).join('');
+  }).getAdminEmbeddedDocs();
+}
+
+function aEdDel(id){
+  if (!confirm('Remove this embedded document for everyone it was pushed to?')) return;
+  google.script.run.withSuccessHandler(function(r){
+    if (r.success){ aEdLoadList(); toast('Removed', 'inf'); }
+    else toast(r.error || 'Could not remove', 'err');
+  }).deleteAdminEmbeddedDoc(id);
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    5. SCHOOL-WIDE REMINDERS
@@ -1169,23 +1881,274 @@ function doGraduate(){
 
 
 /* ═══════════════════════════════════════════════════════════════════
-   16. ROW REWARDS ADMIN — accounts (load, render, search, adjust)
+   16. ROW REWARDS ADMIN — roster + per-student detail
    ═══════════════════════════════════════════════════════════════════ */
 
-// Fetch all ROW accounts from the server, cache them, render the list.
-function loadRowAdminAccounts(){
-  var listEl = document.getElementById('row-admin-acct-list');
-  if (listEl) listEl.innerHTML = '<div style="color:var(--tx3);font-size:12px;padding:10px;">Loading...</div>';
+var _rowAdminView   = 'list';
+var _rowAdminSel    = '';
+var _rowAdminDetail = null;
 
+function renderARowWidget(){
+  var el = document.getElementById('aw-arow');
+  if (!el) return;
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+
+  if (_rowAdminView === 'detail'){
+    el.innerHTML = '<div id="row-admin-detail" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"><div style="color:var(--tx2);font-size:13px;padding:14px;text-align:center;">Loading...</div></div>';
+    aRowLoadDetail();
+    return;
+  }
+
+  el.innerHTML =
+      '<input class="finp" id="row-admin-search" placeholder="Search students and staff" oninput="aRowRenderList()" style="margin-bottom:8px;font-size:13px;flex-shrink:0;">'
+    + '<div id="row-admin-acct-list" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"><div style="color:var(--tx2);font-size:13px;padding:14px;text-align:center;">Loading accounts...</div></div>';
+
+  if (_rowAdminAccounts && _rowAdminAccounts.length) aRowRenderList();
+  else loadRowAdminAccounts();
+}
+
+function loadRowAdminAccounts(){
   google.script.run.withSuccessHandler(function(r){
-    if (!r.success){
-      if (listEl) listEl.innerHTML = '<div style="color:#f87171;font-size:12px;">' + esc(r.error || 'Error') + '</div>';
+    if (!r || !r.success){
+      var el = document.getElementById('row-admin-acct-list');
+      if (el) el.innerHTML = '<div style="color:#f87171;font-size:13px;padding:10px;">' + esc((r && r.error) || 'Error') + '</div>';
       return;
     }
     _rowAdminAccounts = r.accounts || [];
-    renderRowAdminAccounts(_rowAdminAccounts);
+    aRowRenderList();
   }).adminGetAllRowAccounts();
 }
+
+function aRowRenderList(){
+  var el = document.getElementById('row-admin-acct-list');
+  if (!el) return;
+  var q = ((document.getElementById('row-admin-search') || {}).value || '').trim().toLowerCase();
+  var list = (_rowAdminAccounts || []).filter(function(a){
+    if (!q) return true;
+    return String(a.name).toLowerCase().indexOf(q) > -1 || String(a.email).toLowerCase().indexOf(q) > -1;
+  });
+
+  if (!list.length){
+    el.innerHTML = '<div style="color:var(--tx2);font-size:13px;padding:14px;text-align:center;">No matching accounts.</div>';
+    return;
+  }
+
+    function item(a){
+    var who = String(a.email).split('@')[0];
+    var rid = _rowIdSafe(a.email);
+    var e = esc(a.email);
+    function stepBtn(sign, label){
+      return '<button onclick="event.stopPropagation();aRowQuick(\'' + e + '\',' + sign + ')" '
+        + 'style="width:26px;height:26px;flex:none;padding:0;background:' + (sign > 0 ? '#4f46e5' : '#dc2626') + ';color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:800;line-height:1;cursor:pointer;font-family:inherit;">' + label + '</button>';
+    }
+    return '<div class="rowadm-item" style="display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:7px 9px;margin-bottom:5px;">'
+      + '<div onclick="aRowOpen(\'' + e + '\')" style="flex:1;min-width:0;cursor:pointer;">'
+      +   '<div class="rowadm-name" style="font-size:14px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(who) + '</div>'
+      +   '<div class="rowadm-sub" style="font-size:11px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(a.name) + (a.role === 'teacher' ? ' \u00b7 Staff' : '') + '</div>'
+      + '</div>'
+      + stepBtn(-1, '\u2212')
+      + '<input id="rowqty-' + rid + '" class="finp" type="number" value="1" min="1" max="100" onclick="event.stopPropagation();" '
+      +   'style="width:44px;flex:none;padding:4px 2px;text-align:center;font-size:13px;">'
+      + stepBtn(1, '+')
+      + '<div id="rowbal-' + rid + '" style="font-size:19px;font-weight:800;color:var(--a2);min-width:38px;text-align:right;">' + a.balance + '</div>'
+      + '</div>';
+  }
+
+  var students = list.filter(function(a){ return a.role !== 'teacher'; });
+  var staff    = list.filter(function(a){ return a.role === 'teacher'; });
+  var html = '';
+  if (students.length) html += '<div class="rowadm-hdr" style="font-size:10px;font-weight:700;color:var(--tx2);letter-spacing:.5px;text-transform:uppercase;margin:2px 2px 5px;">Students (' + students.length + ')</div>' + students.map(item).join('');
+  if (staff.length)    html += '<div class="rowadm-hdr" style="font-size:10px;font-weight:700;color:var(--tx2);letter-spacing:.5px;text-transform:uppercase;margin:12px 2px 5px;padding-top:8px;border-top:1px solid var(--border);">Staff (' + staff.length + ')</div>' + staff.map(item).join('');
+  el.innerHTML = html;
+}
+
+// One ROW write at a time. Guards every admin balance action against
+// double-clicks and button spam — the client-side half of the fix.
+var _rowBusy = false;
+
+function _rowLock(){
+  if (_rowBusy) return false;
+  _rowBusy = true;
+  document.querySelectorAll('.rowadm-item button, #row-admin-detail button').forEach(function(b){
+    b.disabled = true;
+    b.style.opacity = '.5';
+    b.style.cursor = 'wait';
+  });
+  return true;
+}
+
+function _rowUnlock(){
+  _rowBusy = false;
+  document.querySelectorAll('.rowadm-item button, #row-admin-detail button').forEach(function(b){
+    b.disabled = false;
+    b.style.opacity = '';
+    b.style.cursor = '';
+  });
+}
+
+// Element ids can't contain @ or . — flatten the email for id lookups.
+function _rowIdSafe(email){ return String(email).replace(/[^a-zA-Z0-9]/g, '_'); }
+
+// Apply +/- the amount in that row's box, with a spinner while it saves.
+function aRowQuick(email, sign){
+  var rid = _rowIdSafe(email);
+  var qtyEl = document.getElementById('rowqty-' + rid);
+  var balEl = document.getElementById('rowbal-' + rid);
+  var n = parseInt((qtyEl || {}).value, 10);
+  if (isNaN(n) || n < 1){ toast('Enter a number of 1 or more', 'err'); return; }
+
+  if (!_rowLock()) return;          // already saving — ignore the extra click
+
+  var delta = sign * n;
+  var prev = balEl ? balEl.innerHTML : '';
+
+  // Swap the number for a spinner and lock the row's buttons
+  if (balEl) balEl.innerHTML = '<div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0 0 0 auto;"></div>';
+  var btns = balEl ? balEl.parentNode.querySelectorAll('button') : [];
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+
+  function unlock(){ _rowUnlock(); }
+
+  google.script.run.withSuccessHandler(function(r){
+    unlock();
+    if (r && r.success){
+      (_rowAdminAccounts || []).forEach(function(a){ if (a.email === email) a.balance = r.newBalance; });
+      if (balEl){
+        balEl.innerHTML = r.newBalance;
+        // Brief flash so the change is visible
+        balEl.style.transition = 'color .1s';
+        balEl.style.color = (delta > 0 ? '#22c55e' : '#f87171');
+        setTimeout(function(){ balEl.style.color = 'var(--a2)'; }, 700);
+      }
+      toast((delta > 0 ? '+' : '') + delta + ' ROW \u00b7 now ' + r.newBalance, 'ok');
+    } else {
+      if (balEl) balEl.innerHTML = prev;
+      toast((r && r.error) || 'Could not save', 'err');
+    }
+  }).withFailureHandler(function(e){
+    unlock();
+    if (balEl) balEl.innerHTML = prev;
+    toast((e && e.message) || 'Server error', 'err');
+  }).adminAdjustRowBalance(email, delta, delta > 0 ? 'Admin add' : 'Admin deduct');
+}
+
+function aRowOpen(email){ _rowAdminSel = email; _rowAdminView = 'detail'; _rowAdminDetail = null; renderARowWidget(); }
+function aRowBack(){ _rowAdminView = 'list'; _rowAdminDetail = null; renderARowWidget(); }
+
+function aRowLoadDetail(){
+  google.script.run.withSuccessHandler(function(r){
+    var el = document.getElementById('row-admin-detail');
+    if (!el) return;
+    if (!r || !r.success){
+      el.innerHTML = '<div style="color:#f87171;font-size:13px;padding:10px;">' + esc((r && r.error) || 'Could not load') + '</div>';
+      return;
+    }
+    _rowAdminDetail = r;
+    aRowRenderDetail();
+  }).withFailureHandler(function(e){
+    var el = document.getElementById('row-admin-detail');
+    if (el) el.innerHTML = '<div style="color:#f87171;font-size:13px;padding:10px;">' + esc((e && e.message) || 'Server error') + '</div>';
+  }).adminGetStudentRowDetail(_rowAdminSel);
+}
+
+function aRowRenderDetail(){
+  var el = document.getElementById('row-admin-detail');
+  if (!el || !_rowAdminDetail) return;
+  var d = _rowAdminDetail;
+  var who = String(d.email).split('@')[0];
+
+  function stepBtn(delta, label, color){
+    return '<button onclick="aRowAdjust(' + delta + ')" style="flex:1;padding:11px 6px;background:' + color + ';color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;">' + label + '</button>';
+  }
+
+  var rows = d.transactions.map(function(t){
+    var amtStr, color;
+    if (t.status === 'pending'){ amtStr = 'pending'; color = '#f59e0b'; }
+    else if (t.status === 'denied'){ amtStr = 'denied'; color = 'var(--tx2)'; }
+    else if (t.effect < 0){ amtStr = '\u2212' + Math.abs(t.effect); color = '#ef4444'; }
+    else { amtStr = '+' + t.effect; color = '#22c55e'; }
+    var when = '';
+    try { var ds = (t.resolvedAt || t.createdAt || '').slice(0,10); when = ds ? ((typeof fmtDate === 'function') ? fmtDate(ds) : ds) : ''; } catch(e){}
+
+    return '<div class="rowadm-tx" style="display:flex;align-items:center;gap:9px;padding:8px 10px;border-bottom:1px solid var(--border);">'
+      + '<div style="flex:1;min-width:0;">'
+      +   '<div class="rowadm-name" style="font-size:13px;color:var(--tx);font-weight:500;">' + esc(t.category || t.type) + '</div>'
+      +   '<div class="rowadm-sub" style="font-size:11px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(t.description || '') + (when ? ' \u00b7 ' + when : '') + (t.teacherEmail ? ' \u00b7 ' + esc(String(t.teacherEmail).split('@')[0]) : '') + '</div>'
+      + '</div>'
+      + '<div style="font-size:14px;font-weight:700;color:' + color + ';min-width:52px;text-align:right;">' + amtStr + '</div>'
+      + '<button onclick="aRowDelTx(\'' + esc(t.id) + '\')" title="Delete this transaction" style="padding:4px 9px;background:transparent;color:#f87171;border:1px solid rgba(239,68,68,.4);border-radius:5px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">\u2715</button>'
+      + '</div>';
+  }).join('') || '<div style="color:var(--tx2);font-size:13px;padding:14px;text-align:center;">No transactions yet.</div>';
+
+  el.innerHTML =
+      '<button onclick="aRowBack()" style="padding:6px 12px;background:transparent;color:var(--a2);border:1px solid var(--a4);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:10px;">\u2039 All accounts</button>'
+    + '<div style="text-align:center;margin-bottom:12px;">'
+    +   '<div class="rowadm-name" style="font-size:16px;font-weight:700;color:var(--tx);">' + esc(who) + '</div>'
+    +   '<div class="rowadm-sub" style="font-size:11px;color:var(--tx2);margin-bottom:8px;">' + esc(d.name) + '</div>'
+    +   '<div style="font-size:38px;font-weight:800;color:var(--a2);line-height:1;">' + d.balance + '</div>'
+    +   '<div class="rowadm-sub" style="font-size:11px;color:var(--tx2);">ROWs \u00b7 ' + d.earned + ' earned \u00b7 ' + d.spent + ' spent</div>'
+    + '</div>'
+    + '<div style="display:flex;gap:6px;margin-bottom:8px;">'
+    +   stepBtn(-5,'\u22125','#b91c1c') + stepBtn(-1,'\u22121','#dc2626')
+    +   stepBtn(1,'+1','#4f46e5') + stepBtn(5,'+5','#4338ca')
+    + '</div>'
+    + '<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;">'
+    +   '<input class="finp" type="number" id="rowadm-set" value="' + d.balance + '" min="0" style="flex:1;font-size:14px;text-align:center;">'
+    +   '<button onclick="aRowSetBalance()" style="padding:9px 14px;background:#475569;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Set balance</button>'
+    + '</div>'
+    + '<div class="rowadm-hdr" style="font-size:10px;font-weight:700;color:var(--tx2);letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px;padding-bottom:4px;border-bottom:2px solid var(--a1);">History</div>'
+    + rows;
+}
+
+function aRowAdjust(delta){
+  if (!_rowLock()) return;
+  google.script.run.withSuccessHandler(function(r){
+    _rowUnlock();
+    if (r && r.success){ toast((delta > 0 ? '+' : '') + delta + ' ROW \u00b7 now ' + r.newBalance, 'ok'); aRowRefresh(r.newBalance); }
+    else toast((r && r.error) || 'Error', 'err');
+  }).withFailureHandler(function(e){
+    _rowUnlock();
+    toast((e && e.message) || 'Server error', 'err');
+  }).adminAdjustRowBalance(_rowAdminSel, delta, delta > 0 ? 'Admin add' : 'Admin deduct');
+}
+
+function aRowSetBalance(){
+  var v = (document.getElementById('rowadm-set') || {}).value;
+  var n = parseInt(v, 10);
+  if (isNaN(n) || n < 0){ toast('Enter a number of zero or more', 'err'); return; }
+  if (!confirm('Set this balance to ' + n + '?')) return;
+  if (!_rowLock()) return;
+  google.script.run.withSuccessHandler(function(r){
+    _rowUnlock();
+    if (r && r.success){ toast('Balance set to ' + r.newBalance, 'ok'); aRowRefresh(r.newBalance); }
+    else toast((r && r.error) || 'Error', 'err');
+  }).withFailureHandler(function(e){
+    _rowUnlock();
+    toast((e && e.message) || 'Server error', 'err');
+  }).adminSetRowBalance(_rowAdminSel, n, '');
+}
+
+function aRowDelTx(id){
+  if (!confirm('Delete this transaction?\n\nThe balance will be adjusted to undo it.')) return;
+  if (!_rowLock()) return;
+  google.script.run.withSuccessHandler(function(r){
+    _rowUnlock();
+    if (r && r.success){ toast('Transaction deleted', 'inf'); aRowRefresh(r.newBalance); }
+    else toast((r && r.error) || 'Error', 'err');
+  }).withFailureHandler(function(e){
+    _rowUnlock();
+    toast((e && e.message) || 'Server error', 'err');
+  }).adminDeleteRowTransaction(id);
+}
+
+function aRowRefresh(newBal){
+  (_rowAdminAccounts || []).forEach(function(a){ if (a.email === _rowAdminSel) a.balance = newBal; });
+  aRowLoadDetail();
+}
+
+function filterRowAccounts(){ aRowRenderList(); }
 
 // Render the accounts list, splitting students from staff with a divider.
 // Each row has +1 / ± / -1 quick-action buttons.
@@ -1322,3 +2285,4 @@ function Utilities_format(d){
 }
 
 </script>
+

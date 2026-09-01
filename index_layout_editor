@@ -24,6 +24,7 @@
 .le-cell-overlay{pointer-events:none;border-radius:10px;transition:all .12s;z-index:1}
 .le-cell-overlay.valid{background:rgba(34,197,94,.15);border:2px dashed #22c55e}
 .le-cell-overlay.invalid{background:rgba(239,68,68,.15);border:2px dashed #ef4444}
+.le-cell-overlay.swap{background:rgba(245,158,11,.18);border:2px dashed #f59e0b}
 .le-tile{background:var(--card);border:2px solid var(--border);border-radius:12px;padding:14px;cursor:move;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;transition:all .15s;position:relative;user-select:none}
 .le-tile:hover{border-color:var(--a4)}
 .le-tile.selected{border-color:var(--a1);box-shadow:0 0 0 2px var(--a4)}
@@ -50,6 +51,7 @@
     <div class="le-title">Customize My Planner</div>
     <div class="le-actions">
       <button class="btn btn-ghost btn-sm" onclick="resetLayout()">Reset</button>
+      <button class="btn btn-ghost btn-sm" onclick="compactLayout()">Compact</button>
       <button class="btn btn-primary btn-sm" onclick="saveLayout()">Save Layout</button>
     </div>
   </div>
@@ -94,7 +96,7 @@ var LE_MODES = {
 };
 
 var LE_CATEGORIES = {
-  school: ['schedule','tasks','notes','lunch','scores','rowbank'],
+  school: ['schedule','tasks','notes','lunch','scores','rowbank','rowapprovals'],
   productivity: ['clock','timer','countdowns','reminders'],
   info: ['weather','quote','stocks','scores'],
   apps: ['links','search','gapps','spotify']
@@ -107,9 +109,13 @@ var LE_SIZES = [
 ];
 
 function openLayoutEditor(mode){
-  // Permission gate — students can't open teacher/admin editors
-  if (mode === 'teacher' && (!CU || CU.role !== 'teacher')) return;
-  if (mode === 'admin'   && (!CU || CU.role !== 'admin'))   return;
+  // Permission gate — students can't open teacher/admin editors.
+  // Both gate on realRole so a teacher previewing as a student can still
+  // reach these; there is no separate 'admin' role in this app.
+  if ((mode === 'teacher' || mode === 'admin') && (!CU || CU.realRole !== 'teacher')){
+    toast('Teachers only', 'err');
+    return;
+  }
 
   le_mode = mode || 'home';
   var cfg = LE_MODES[le_mode];
@@ -239,6 +245,48 @@ function leFindFreeSpot(cs, rs, excludeId){
   return null;
 }
 
+// Resolve a tile's current size.
+function leSizeOf(id){
+  var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+  return Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+}
+
+// Which tiles (if any) sit inside this region? Returns an array of ids.
+function leTilesInRegion(col, row, cs, rs, excludeIds){
+  excludeIds = excludeIds || [];
+  var hits = {};
+  le_state.tileOrder.forEach(function(id){
+    if (excludeIds.indexOf(id) > -1) return;
+    var p = le_state.tilePositions[id];
+    if (!p) return;
+    var sz = leSizeOf(id);
+    for (var dc = 0; dc < sz.c; dc++){
+      for (var dr = 0; dr < sz.r; dr++){
+        var c = p.col + dc, r = p.row + dr;
+        if (c >= col && c < col + cs && r >= row && r < row + rs) hits[id] = true;
+      }
+    }
+  });
+  return Object.keys(hits);
+}
+
+// Is a region clear, ignoring the listed tiles?
+function leRegionFree(col, row, cs, rs, excludeIds){
+  if (col < 1 || col + cs - 1 > 4 || row < 1) return false;
+  return leTilesInRegion(col, row, cs, rs, excludeIds).length === 0;
+}
+
+// Can dragId land at col,row by trading places with otherId?
+function leCanSwap(dragId, otherId, col, row){
+  var oldPos = le_state.tilePositions[dragId];
+  if (!oldPos) return false;
+  var dragSz = leSizeOf(dragId), otherSz = leSizeOf(otherId);
+  var both = [dragId, otherId];
+  // dragged tile into the new spot, other tile into the vacated spot
+  return leRegionFree(col, row, dragSz.c, dragSz.r, both)
+      && leRegionFree(oldPos.col, oldPos.row, otherSz.c, otherSz.r, both);
+}
+
 function leSpotIsFree(col, row, cs, rs, excludeId){
   if (col < 1 || col + cs - 1 > 4) return false;
   if (row < 1) return false;
@@ -272,13 +320,19 @@ function renderLeCanvas(){
     rowbank:'w-rowoars', rowapprovals:'w-rowoars', reminders:'w-timer'
   };
   var canvas = document.getElementById('le-canvas');
+  // Pick the right widget catalog for the current mode (home / teacher / admin)
+  // so tile names render correctly instead of showing raw IDs like "tgrp".
+  var cfg = LE_MODES[le_mode];
+  var widgetArr = window[cfg.widgetsVar];
+  if (!widgetArr || !widgetArr.length) widgetArr = ALL_WIDGETS;
+
   canvas.innerHTML = le_state.tileOrder.map(function(id){
     var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
     var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
     var pos = le_state.tilePositions[id] || {col:1, row:1};
     var name = id;
-    for (var i = 0; i < ALL_WIDGETS.length; i++){
-      if (ALL_WIDGETS[i].id === id){ name = ALL_WIDGETS[i].name; break; }
+    for (var i = 0; i < widgetArr.length; i++){
+      if (widgetArr[i].id === id){ name = widgetArr[i].name; break; }
     }
     var icoSym = ICON_MAP[id] || 'w-apps';
     var isSel = id === le_selectedId;
@@ -327,12 +381,12 @@ function toggleLeSizePicker(id){
   var cur = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
   var pos = le_state.tilePositions[id];
   var html = '<div class="le-size-pop-title">Pick a size</div><div class="le-size-grid">';
+  // Every size is selectable — leResize relocates anything in the way.
+  // (Disabling sizes that didn't fit made resizing impossible after a
+  // compacted save, since compaction leaves no gaps.)
   LE_SIZES.forEach(function(s){
-    var fits = leSpotIsFree(pos.col, pos.row, s.c, s.r, id);
     var sel = (s.c === cur.c && s.r === cur.r) ? ' sel' : '';
-    var cls = fits ? '' : ' disabled';
-    var click = fits ? 'onclick="leResize(\'' + id + '\',' + s.c + ',' + s.r + ')"' : '';
-    html += '<div class="le-size-cell' + sel + cls + '" ' + click + '>' + s.c + 'x' + s.r + '</div>';
+    html += '<div class="le-size-cell' + sel + '" onclick="leResize(\'' + id + '\',' + s.c + ',' + s.r + ')">' + s.c + 'x' + s.r + '</div>';
   });
   html += '</div>';
   var pop = document.createElement('div');
@@ -344,9 +398,26 @@ function toggleLeSizePicker(id){
   if (tile) tile.appendChild(pop);
 }
 
+// Resize a tile, nudging it left if it would run off the right edge and
+// relocating any tiles the new footprint now covers.
 function leResize(id, cols, rows){
   if (!le_state.tileSizes) le_state.tileSizes = {};
   le_state.tileSizes[id] = {c:cols, r:rows};
+
+  var pos = le_state.tilePositions[id] || {col:1, row:1};
+  if (pos.col + cols - 1 > 4){
+    pos = {col: Math.max(1, 4 - cols + 1), row: pos.row};
+    le_state.tilePositions[id] = pos;
+  }
+
+  // Bump anything the resized tile now sits on top of
+  var displaced = leTilesInRegion(pos.col, pos.row, cols, rows, [id]);
+  displaced.forEach(function(oid){ delete le_state.tilePositions[oid]; });
+  displaced.forEach(function(oid){
+    var osz = leSizeOf(oid);
+    le_state.tilePositions[oid] = leFindFreeSpot(osz.c, osz.r, null) || {col:1, row:1};
+  });
+
   var pop = document.getElementById('le-size-pop');
   if (pop) pop.remove();
   renderLeCanvas();
@@ -354,24 +425,94 @@ function leResize(id, cols, rows){
 
 // Auto-scroll the canvas-wrap when the cursor is near its top/bottom edge
 // during a drag. Mirrors the page-level _dragScroll pattern.
+// Auto-scroll the canvas when the cursor nears the top/bottom edge.
+// A single loop reads a speed variable that dragover updates — the old
+// version spawned a fresh recursive loop per dragover event, so the
+// loops stacked and the scroll ran away.
 var _leScrollRaf = null;
+var _leScrollSpeed = 0;
+var _leLastX = 0, _leLastY = 0;   // last cursor position, for re-aiming while scrolling
+
 function _leDragScroll(e){
+  _leLastX = e.clientX;
+  _leLastY = e.clientY;
   var wrap = document.querySelector('.le-canvas-wrap');
   if (!wrap) return;
   var rect = wrap.getBoundingClientRect();
-  var zone = 70;            // hot-zone size at top/bottom of canvas
+  var zone = 60;      // hot-zone height at each edge
+  var maxSpeed = 7;   // px per frame at full deflection — lower = gentler
   var y = e.clientY;
-  if (_leScrollRaf) cancelAnimationFrame(_leScrollRaf);
+
   if (y < rect.top + zone){
-    var sUp = Math.max(4, Math.round((rect.top + zone - y) / zone * 14));
-    (function tick(){ _leScrollRaf = requestAnimationFrame(function(){ wrap.scrollTop -= sUp; tick(); }); })();
+    _leScrollSpeed = -Math.ceil((rect.top + zone - y) / zone * maxSpeed);
   } else if (y > rect.bottom - zone){
-    var sDn = Math.max(4, Math.round((y - (rect.bottom - zone)) / zone * 14));
-    (function tick(){ _leScrollRaf = requestAnimationFrame(function(){ wrap.scrollTop += sDn; tick(); }); })();
+    _leScrollSpeed = Math.ceil((y - (rect.bottom - zone)) / zone * maxSpeed);
+  } else {
+    _leScrollSpeed = 0;
   }
+
+  if (_leScrollSpeed !== 0 && !_leScrollRaf) _leScrollLoop();
 }
+
+function _leScrollLoop(){
+  _leScrollRaf = requestAnimationFrame(function(){
+    _leScrollRaf = null;
+    if (!_leScrollSpeed) return;
+    var wrap = document.querySelector('.le-canvas-wrap');
+    if (wrap) wrap.scrollTop += _leScrollSpeed;
+    leUpdateDropOverlay(_leLastX, _leLastY);   // canvas moved — re-aim the overlay
+    _leScrollLoop();
+  });
+}
+
 function _leStopDragScroll(){
+  _leScrollSpeed = 0;
   if (_leScrollRaf){ cancelAnimationFrame(_leScrollRaf); _leScrollRaf = null; }
+}
+
+// Position the drop overlay for a given screen coordinate. Called from
+// dragover AND from the scroll loop, since scrolling moves the canvas
+// under a stationary cursor without firing any drag event.
+function leUpdateDropOverlay(clientX, clientY){
+  if (!le_dragId) return;
+  var canvas = document.getElementById('le-canvas');
+  if (!canvas) return;
+
+  var rect = canvas.getBoundingClientRect();
+  var x = clientX - rect.left;
+  var y = clientY - rect.top;
+  var actualCellW = (rect.width + 10) / 4;
+  var cellH = 130;
+  var col = Math.floor(x / actualCellW) + 1;
+  var row = Math.floor(y / cellH) + 1;
+  if (col < 1) col = 1;
+  if (col > 4) col = 4;
+  if (row < 1) row = 1;
+
+  var sz = leSizeOf(le_dragId);
+  if (col + sz.c - 1 > 4) col = 4 - sz.c + 1;
+  var fits = leSpotIsFree(col, row, sz.c, sz.r, le_dragId);
+
+  var swapWith = '';
+  if (!fits){
+    var hits = leTilesInRegion(col, row, sz.c, sz.r, [le_dragId]);
+    if (hits.length === 1 && leCanSwap(le_dragId, hits[0], col, row)) swapWith = hits[0];
+  }
+
+  var ov = document.getElementById('le-overlay');
+  if (!ov){
+    ov = document.createElement('div');
+    ov.id = 'le-overlay';
+    ov.className = 'le-cell-overlay';
+    canvas.appendChild(ov);
+  }
+  ov.className = 'le-cell-overlay ' + (fits ? 'valid' : (swapWith ? 'swap' : 'invalid'));
+  ov.style.gridColumn = col + ' / span ' + sz.c;
+  ov.style.gridRow = row + ' / span ' + sz.r;
+  ov.dataset.col = col;
+  ov.dataset.row = row;
+  ov.dataset.fits = fits ? '1' : '0';
+  ov.dataset.swap = swapWith;
 }
 
 function attachLeDragHandlers(){
@@ -398,39 +539,8 @@ function attachLeDragHandlers(){
     if (!le_dragId) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-
-    // Drive auto-scroll based on cursor position relative to canvas-wrap
     _leDragScroll(e);
-
-    var rect = canvas.getBoundingClientRect();
-    var x = e.clientX - rect.left;
-    var y = e.clientY - rect.top;
-    var actualCellW = (rect.width + 10) / 4;
-    var cellH = 130;
-    var col = Math.floor(x / actualCellW) + 1;
-    var row = Math.floor(y / cellH) + 1;
-    if (col < 1) col = 1;
-    if (col > 4) col = 4;
-    if (row < 1) row = 1;
-
-    var defSz = le_dragId.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[le_dragId];
-    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[le_dragId] || {});
-    if (col + sz.c - 1 > 4) col = 4 - sz.c + 1;
-    var fits = leSpotIsFree(col, row, sz.c, sz.r, le_dragId);
-
-    var ov = document.getElementById('le-overlay');
-    if (!ov){
-      ov = document.createElement('div');
-      ov.id = 'le-overlay';
-      ov.className = 'le-cell-overlay';
-      canvas.appendChild(ov);
-    }
-    ov.className = 'le-cell-overlay ' + (fits ? 'valid' : 'invalid');
-    ov.style.gridColumn = col + ' / span ' + sz.c;
-    ov.style.gridRow = row + ' / span ' + sz.r;
-    ov.dataset.col = col;
-    ov.dataset.row = row;
-    ov.dataset.fits = fits ? '1' : '0';
+    leUpdateDropOverlay(e.clientX, e.clientY);
   });
 
   canvas.addEventListener('drop', function(e){
@@ -438,11 +548,21 @@ function attachLeDragHandlers(){
     _leStopDragScroll();
     if (!le_dragId) return;
     var ov = document.getElementById('le-overlay');
-    if (!ov || ov.dataset.fits !== '1'){
-      if (ov) ov.remove();
+    if (!ov){ return; }
+
+    var swapWith = ov.dataset.swap || '';
+    if (ov.dataset.fits !== '1' && !swapWith){
+      ov.remove();
       return;
     }
-    le_state.tilePositions[le_dragId] = {col: parseInt(ov.dataset.col,10), row: parseInt(ov.dataset.row,10)};
+
+    var newPos = {col: parseInt(ov.dataset.col,10), row: parseInt(ov.dataset.row,10)};
+    if (swapWith){
+      // Trade places — the other tile takes the spot we're leaving
+      var oldPos = le_state.tilePositions[le_dragId];
+      le_state.tilePositions[swapWith] = {col: oldPos.col, row: oldPos.row};
+    }
+    le_state.tilePositions[le_dragId] = newPos;
     if (ov) ov.remove();
     renderLeCanvas();
   });
@@ -450,7 +570,14 @@ function attachLeDragHandlers(){
 
 function resetLayout(){
   if (!confirm('Reset layout to defaults? You can still cancel by closing without saving.')) return;
-  le_state.tileOrder = ['clock','schedule','tasks','notes','links'];
+  // Defaults differ per mode — resetting admin must not install home widgets
+  if (le_mode === 'admin'){
+    le_state.tileOrder = ['abell','astats','arepair','aschedcal','alunch','aembed','agrad','arow','arem','aclean'];
+  } else if (le_mode === 'teacher'){
+    le_state.tileOrder = ['tview','tgrp','tpush','talink','trem','rowapprovals'];
+  } else {
+    le_state.tileOrder = ['clock','schedule','tasks','notes','links'];
+  }
   le_state.tileSizes = {};
   le_state.tilePositions = {};
   le_state.tileOrder.forEach(function(id){
@@ -463,8 +590,77 @@ function resetLayout(){
   renderLeCanvas();
 }
 
+// Compact the layout: push every tile up & left as far as it can go,
+// preserving the user's intended top-to-bottom, left-to-right reading order.
+// Eliminates gaps so the rendered home page doesn't stretch off-screen.
+function compactLayout(){
+  if (!le_state || !le_state.tileOrder.length) return;
+
+  // Sort by current position (row first, then col) to preserve the user's intent
+  var sorted = le_state.tileOrder.slice().sort(function(a, b){
+    var pa = le_state.tilePositions[a] || {col:1, row:1};
+    var pb = le_state.tilePositions[b] || {col:1, row:1};
+    if (pa.row !== pb.row) return pa.row - pb.row;
+    return pa.col - pb.col;
+  });
+
+  // Re-place each tile in the first free slot starting from row 1
+  var newPositions = {};
+  var occupied = {};
+  function isFree(c, r, cs, rs){
+    for (var dc = 0; dc < cs; dc++){
+      for (var dr = 0; dr < rs; dr++){
+        if (occupied[(c+dc) + ',' + (r+dr)]) return false;
+        if (c + dc > 4) return false;
+      }
+    }
+    return true;
+  }
+  function markOccupied(c, r, cs, rs){
+    for (var dc = 0; dc < cs; dc++){
+      for (var dr = 0; dr < rs; dr++){
+        occupied[(c+dc) + ',' + (r+dr)] = true;
+      }
+    }
+  }
+
+  sorted.forEach(function(id){
+    var defSz = id.indexOf('embed-') === 0 ? DEF_TILE_SIZES['embed'] : DEF_TILE_SIZES[id];
+    var sz = Object.assign({}, defSz || {c:2,r:1}, le_state.tileSizes[id] || {});
+
+    for (var r = 1; r <= 60; r++){
+      for (var c = 1; c <= 4 - sz.c + 1; c++){
+        if (isFree(c, r, sz.c, sz.r)){
+          newPositions[id] = {col:c, row:r};
+          markOccupied(c, r, sz.c, sz.r);
+          r = 999; c = 999; // break out
+        }
+      }
+    }
+  });
+
+  le_state.tilePositions = newPositions;
+  renderLeCanvas();
+}
+
 function saveLayout(){
+  // Auto-compact before saving so students can't end up with sprawling, gap-filled layouts
+  compactLayout();
+
   var cfg = LE_MODES[le_mode];
+
+  // Remember what was taken off the canvas so the page builders don't
+  // helpfully put it back on the next load.
+  var removedKey = {home:'tileRemoved', teacher:'teacherTileRemoved', admin:'adminTileRemoved'}[le_mode];
+  if (removedKey){
+    var catalog = window[cfg.widgetsVar] || [];
+    var removed = [];
+    catalog.forEach(function(w){
+      if (le_state.tileOrder.indexOf(w.id) === -1) removed.push(w.id);
+    });
+    prefs[removedKey] = removed;
+  }
+
   prefs[cfg.orderKey] = le_state.tileOrder.slice();
   prefs[cfg.sizesKey] = Object.assign({}, le_state.tileSizes);
   prefs[cfg.positionsKey] = Object.assign({}, le_state.tilePositions);

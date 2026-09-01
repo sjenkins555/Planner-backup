@@ -225,13 +225,34 @@ function setBgColor(v){
 }
 
 // Apply the URL the user typed in the image-URL field.
+// Validates that it looks like a direct image link, then persists.
 function setBgUrl(){
   var u = document.getElementById('bg-url-input').value.trim();
   if (!u){ toast('Enter an image URL', 'err'); return; }
-  prefs.bgType = 'image';
+
+  // Google Drive share links aren't direct images — convert them
+  var drive = u.match(/drive\.google\.com\/file\/d\/([^/]+)/);
+  if (drive) u = 'https://drive.google.com/uc?export=view&id=' + drive[1];
+
+  // Warn (but still try) if it doesn't look like an image file
+  if (!/\.(jpe?g|png|gif|webp|avif|svg)(\?|$)/i.test(u) && u.indexOf('drive.google.com') === -1){
+    toast('That may not be a direct image link — right-click an image and "Copy image address"', 'inf');
+  }
+
+  prefs.bgType  = 'image';
   prefs.bgValue = u;
   applyBackground();
   buildBgPresets();
+  saveBgPrefs();
+}
+
+// Persist background prefs. Debounced so dragging a slider doesn't
+// fire a server call per pixel.
+function saveBgPrefs(){
+  clearTimeout(window._bgSaveTimer);
+  window._bgSaveTimer = setTimeout(function(){
+    google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  }, 500);
 }
 
 // Reset background back to "no override" — uses the UI style's default.

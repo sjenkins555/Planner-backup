@@ -99,6 +99,38 @@ function buildCalPage(){
   highlightCalView(calMode);
   updateCalTitle();
   loadCalEvents(); // also calls renderCalView + renderCalRail
+  startCalWatch();
+}
+
+// ── AUTO-REFRESH WATCHER ────────────────────────────────────────
+// The "+ New" button saves through the shared task code, which doesn't
+// know the calendar exists — so the grid didn't repaint until you left
+// the tab and came back. This watches myTasks and repaints in place.
+// Only does work while the calendar is actually on screen.
+var _calWatchTimer = null;
+var _calWatchSig   = '';
+
+function _calTaskSig(){
+  var t = myTasks || [];
+  var s = t.length + '|';
+  for (var i = 0; i < t.length; i++){
+    s += t[i].id + ':' + t[i].status + ':' + (t[i].dueDate || '') + ':' + (t[i].title || '') + ';';
+  }
+  return s;
+}
+
+function startCalWatch(){
+  _calWatchSig = _calTaskSig();
+  if (_calWatchTimer) return;
+  _calWatchTimer = setInterval(function(){
+    var host = document.getElementById('cal2-host');
+    if (!host || host.offsetParent === null) return; // tab hidden — do nothing
+    var sig = _calTaskSig();
+    if (sig === _calWatchSig) return;
+    _calWatchSig = sig;
+    renderCalView();
+    renderCalRail();
+  }, 400);
 }
 
 
@@ -577,19 +609,112 @@ function calCellClick(dateStr){
   renderCalRail();
 }
 
-// User clicked "+ New" — open the task modal pre-filled with the selected
-// date. Reuses the global task-modal IDs (m-tt, m-td, m-tn, m-ts).
+// User clicked "+ New" — open the add-event popup. Everything created
+// here becomes a real event on the student's own Google Calendar.
 function calOpenAdd(){
-  var d  = _calSelectedDay || _ymdLocal(new Date());
-  var tt = document.getElementById('m-tt');
-  var td = document.getElementById('m-td');
-  var tn = document.getElementById('m-tn');
-  if (tt) tt.value = '';
-  if (td) td.value = d;
-  if (tn) tn.value = '';
-  var ts = document.getElementById('m-ts');
-  if (ts) ts.innerHTML = buildSubjectDropdownOptions('');
-  openModal('task-modal');
+  var d = _calSelectedDay || _ymdLocal(new Date());
+  var old = document.getElementById('cal-add-ov');
+  if (old) old.remove();
+
+  var ov = document.createElement('div');
+  ov.id = 'cal-add-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.onclick = function(e){ if (e.target === ov) calCloseAdd(); };
+
+  ov.innerHTML =
+    '<div style="background:var(--bg2,#131826);border:1px solid var(--border,#2a3348);border-radius:14px;padding:18px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,.5);">'
+    + '<div style="font-size:15px;font-weight:700;color:var(--tx,#e2e8f0);margin-bottom:4px;">New Event</div>'
+    + '<div style="font-size:11px;color:var(--tx3,#94a3b8);margin-bottom:14px;">Saves to your Google Calendar</div>'
+    + '<input class="finp" id="cadd-title" placeholder="Event title *" style="width:100%;margin-bottom:8px;">'
+    + '<input type="date" class="finp" id="cadd-date" value="' + d + '" style="width:100%;margin-bottom:8px;">'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+    +   '<div><div style="font-size:10px;color:var(--tx3,#94a3b8);margin-bottom:3px;">STARTS</div><input type="time" class="finp" id="cadd-start" value="08:00" style="width:100%;"></div>'
+    +   '<div><div style="font-size:10px;color:var(--tx3,#94a3b8);margin-bottom:3px;">ENDS</div><input type="time" class="finp" id="cadd-end" value="08:30" style="width:100%;"></div>'
+    + '</div>'
+    + '<textarea class="fta" id="cadd-notes" placeholder="Notes (optional)" style="width:100%;min-height:48px;font-size:12px;margin-bottom:10px;"></textarea>'
+    + '<div id="cadd-msg" style="font-size:12px;min-height:16px;margin-bottom:8px;color:#f87171;"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
+    +   '<button class="btn btn-ghost" onclick="calCloseAdd()">Cancel</button>'
+    +   '<button class="btn btn-primary" id="cadd-save" onclick="doCalAdd()">Save</button>'
+    + '</div>'
+    + '</div>';
+
+  document.body.appendChild(ov);
+  var t = document.getElementById('cadd-title');
+  if (t) t.focus();
+}
+
+// Close the add popup.
+function calCloseAdd(){
+  var ov = document.getElementById('cal-add-ov');
+  if (ov) ov.remove();
+}
+
+// Create the event on the student's own Google Calendar, then drop it
+// straight into the local list so the grid updates without a refetch.
+function doCalAdd(){
+  var title = (document.getElementById('cadd-title').value || '').trim();
+  var date  = document.getElementById('cadd-date').value  || '';
+  var st    = document.getElementById('cadd-start').value || '';
+  var en    = document.getElementById('cadd-end').value   || '';
+  var notes = (document.getElementById('cadd-notes').value || '').trim();
+  var msg   = document.getElementById('cadd-msg');
+  var btn   = document.getElementById('cadd-save');
+
+  msg.style.color = '#f87171';
+  if (!title){ msg.textContent = 'Enter a title.'; return; }
+  if (!date){  msg.textContent = 'Pick a date.';   return; }
+  if (!st || !en){ msg.textContent = 'Pick a start and end time.'; return; }
+  if (en <= st){   msg.textContent = 'End time must be after start time.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  msg.style.color = 'var(--tx3,#94a3b8)';
+  msg.textContent = 'Adding to your Google Calendar...';
+
+  google.script.run.withSuccessHandler(function(g){
+    if (!g || !g.success){
+      btn.disabled = false; btn.textContent = 'Save';
+      msg.style.color = '#f87171';
+      msg.textContent = (g && g.error) ? g.error : 'Could not create the event.';
+      return;
+    }
+
+    // Show it right away instead of waiting on a refetch
+    _calEvents.push({
+      id:            g.id,
+      calendarId:    (CU && CU.email) || 'primary',
+      calendarName:  'My Calendar',
+      calendarColor: '#6366f1',
+      title:         title,
+      description:   notes,
+      location:      '',
+      start:         date + 'T' + st + ':00',
+      end:           date + 'T' + en + ':00',
+      allDay:        false,
+      recurring:     false,
+      htmlLink:      g.htmlLink || ''
+    });
+    var ck = _calCache[_calCacheKey()];
+    if (ck) ck.events = _calEvents;
+
+    calCloseAdd();
+    toast('Added to your Google Calendar', 'ok');
+    renderCalView();
+    renderCalRail();
+
+  }).withFailureHandler(function(e){
+    btn.disabled = false; btn.textContent = 'Save';
+    msg.style.color = '#f87171';
+    msg.textContent = (e && e.message) || 'Could not reach Google Calendar.';
+  }).createCalendarEvent(JSON.stringify({
+    title:       title,
+    date:        date,
+    startTime:   st,
+    endTime:     en,
+    description: notes,
+    calendarId:  'primary'
+  }));
 }
 
 // Toggle a task's completed state. Delegates to the shared toggleTask
@@ -875,7 +1000,5 @@ function toggleHideCompleted(checked){
   renderCalView();
   renderCalRail();
 }
-
-</script>
 
 </script>

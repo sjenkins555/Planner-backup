@@ -1,15 +1,16 @@
 // ════════════════════════════════════════════════════════════
-// CEDAR HOLLOW LIBRARY — TEST
+// CEDAR HOLLOW LIBRARY — Live
 // Edit and break things here freely. Promote to LIVE when ready.
 // ════════════════════════════════════════════════════════════
 
 // Library version marker — bump this each time you publish a new version
 const LIB_VERSION = 'Add Calendar API';
 
-// ─── CONFIG ──────────────────────────────────────────────────
-// The library reads/writes from a specific spreadsheet.
-// IMPORTANT: This is the TEST sheet. The Live Library will use the Live sheet ID.
-const PLANNER_SHEET_ID = '1G1J9nhaEonNnD5rQq3YRqh1KatuAwlcHd5yDb99db9Y';
+// ╔══════════════════════════════════════════════════════════╗
+// ║  CONFIG — edit these values if anything changes          ║
+// ║  This is the ONLY place IDs should live in this file.    ║
+// ╚══════════════════════════════════════════════════════════╝
+const PLANNER_SHEET_ID = '13hJWwIdnbtR01o0axK3tbj8G-VU22-KjOdrox0Kr5GY';
 
 // ─── SANITY CHECK ────────────────────────────────────────────
 function ping() {
@@ -972,6 +973,21 @@ function _getRowBalance(email) {
   return 0;
 }
 
+// Atomically add to a balance. Parallel callers (Approve All fires every
+// approval at once) were each reading the same starting value and writing
+// the same result, so two approvals could land as one ROW.
+function _addRowBalance(email, delta) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var newBal = Math.max(0, _getRowBalance(email) + delta);
+    _setRowBalance(email, newBal);
+    return newBal;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function _setRowBalance(email, newBal) {
   var sheet = getSheet('RowAccounts');
   if (!sheet) return false;
@@ -1163,22 +1179,32 @@ function approveRowRequest(requestId, amount, comment) {
     }
     var sheet = getSheet('RowTransactions');
     if (!sheet) return {success: false};
-    var data = sheet.getDataRange().getValues();
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][0]) === String(requestId)
-          && String(data[i][2]) === u.email
-          && String(data[i][7]) === 'pending') {
-        var studentEmail = String(data[i][1]);
-        sheet.getRange(i + 1, 5).setValue(amt);
-        sheet.getRange(i + 1, 8).setValue('approved');
-        sheet.getRange(i + 1, 10).setValue(new Date().toISOString());
-        sheet.getRange(i + 1, 11).setValue(String(comment || ''));
-        var newBal = _getRowBalance(studentEmail) + amt;
-        _setRowBalance(studentEmail, newBal);
-        return {success: true, newBalance: newBal};
+
+    // Hold the lock across the whole find-mark-credit sequence. Without it,
+    // two calls for the same request (double-click, two open tabs, Approve
+    // All firing in parallel) can both see it as pending and both credit.
+    var lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try {
+      var data = sheet.getDataRange().getValues();
+      for (var i = 1; i < data.length; i++) {
+        if (String(data[i][0]) === String(requestId)
+            && String(data[i][2]) === u.email
+            && String(data[i][7]) === 'pending') {
+          var studentEmail = String(data[i][1]);
+          sheet.getRange(i + 1, 5).setValue(amt);
+          sheet.getRange(i + 1, 8).setValue('approved');
+          sheet.getRange(i + 1, 10).setValue(new Date().toISOString());
+          sheet.getRange(i + 1, 11).setValue(String(comment || ''));
+          SpreadsheetApp.flush();          // commit "approved" before the lock releases
+          var newBal = _addRowBalance(studentEmail, amt);
+          return {success: true, newBalance: newBal};
+        }
       }
+      return {success: false, error: 'Request not found or already resolved.'};
+    } finally {
+      lock.releaseLock();
     }
-    return {success: false, error: 'Request not found or already resolved.'};
   } catch(e) {
     return {success: false, error: e.toString()};
   }
@@ -1289,6 +1315,20 @@ function adminGetAllRowAccounts() {
   }
 }
 
+// Reject an identical adjustment for the same student within a few seconds.
+// Catches double-submits the browser guard missed (two tabs, fast clicks).
+function _rowDupeGuard(email, delta) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var key = 'rowadj_' + Utilities.base64EncodeWebSafe(email + '|' + delta);
+    if (cache.get(key)) return true;
+    cache.put(key, '1', 3);
+    return false;
+  } catch(e) {
+    return false;   // cache trouble shouldn't block a legitimate adjustment
+  }
+}
+
 function adminAdjustRowBalance(studentEmail, delta, reason) {
   try {
     var u = getCurrentUser();
@@ -1296,7 +1336,8 @@ function adminAdjustRowBalance(studentEmail, delta, reason) {
     var d = parseInt(delta, 10);
     if (isNaN(d) || d === 0) return {success: false, error: 'Adjustment must be a non-zero number.'};
     if (Math.abs(d) > 100) return {success: false, error: 'Adjustment too large (max ±100).'};
-    if (!studentEmail) return {success: false, error: 'No account selected.'};
+        if (!studentEmail) return {success: false, error: 'No account selected.'};
+    if (_rowDupeGuard(studentEmail, d)) return {success: false, error: 'Duplicate click ignored — that adjustment was just made.'};
 
     var users = getSheet('Users');
     var found = false;
@@ -1308,9 +1349,7 @@ function adminAdjustRowBalance(studentEmail, delta, reason) {
     }
     if (!found) return {success: false, error: 'Account not found.'};
 
-    var cur = _getRowBalance(studentEmail);
-    var newBal = Math.max(0, cur + d);
-    _setRowBalance(studentEmail, newBal);
+        var newBal = _addRowBalance(studentEmail, d);
 
     var txSheet = getSheet('RowTransactions');
     if (txSheet) {
@@ -1545,146 +1584,6 @@ function runDataCleanup(target) {
   }
 }
 
-function importLunchData(rawText) {
-  var u = getCurrentUser();
-  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
-  if (!rawText || typeof rawText !== 'string') return {success: false, error: 'No text provided'};
-
-  var sheet = getSheet('LunchMenu');
-  if (!sheet) return {success: false, error: 'LunchMenu sheet missing'};
-
-  // Auto-clean: keep only the last 60 days of menu data so the sheet doesn't grow forever.
-  try {
-    var cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 60);
-    var allData = sheet.getDataRange().getValues();
-    for (var r = allData.length - 1; r >= 1; r--) {
-      var d = allData[r][0];
-      if (!d) continue;
-      var dateVal = d instanceof Date ? d : new Date(d);
-      if (!isNaN(dateVal) && dateVal < cutoff) {
-        sheet.deleteRow(r + 1);
-      }
-    }
-  } catch(e) {
-    // Don't block the import if cleanup fails
-  }
-
-  // Parse the multi-line PDF text format into per-day records.
-  // Format pattern: line ending with a number = main course + day-of-month.
-  // All lines after that until "Milk" are sides. "Milk" closes the day.
-  var lines = rawText.split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
-
-  // Skip the day-of-week header row if it's present
-  var dowHeader = /^MONDAY\s+TUESDAY\s+WEDNESDAY\s+THURSDAY\s+FRIDAY/i;
-  lines = lines.filter(function(l){ return !dowHeader.test(l); });
-
-  // Skip the trailing chef salad disclaimer
-  lines = lines.filter(function(l){
-    return !/chef salad is offered/i.test(l) && !/menu is subject to change/i.test(l);
-  });
-
-  // Skip lines that are just numbers (the empty placeholder days like "19 20 21 22")
-  lines = lines.filter(function(l){ return !/^[\d\s]+$/.test(l); });
-
-  var days = [];
-  var current = null;
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i];
-    // Main course detection: line ends with " <number>" (1-31)
-    var m = line.match(/^(.+?)\s+(\d{1,2})$/);
-    if (m && parseInt(m[2], 10) >= 1 && parseInt(m[2], 10) <= 31) {
-      // Save the previous day if we had one
-      if (current) days.push(current);
-      current = {
-        day: parseInt(m[2], 10),
-        main: m[1].trim(),
-        sides: []
-      };
-    } else if (current) {
-      // It's a side, veg note, or "Milk"
-      if (/^milk$/i.test(line)) {
-        // Milk closes the day; don't store it as a side
-        days.push(current);
-        current = null;
-      } else {
-        current.sides.push(line);
-      }
-    }
-  }
-  // Catch any final day that didn't end with "Milk"
-  if (current) days.push(current);
-
-  if (!days.length) {
-    return {success: false, error: 'Could not find any menu days in the text. Make sure each day has a main course followed by a number (e.g. "Fish Sticks 1").'};
-  }
-
-  // Ask the user which month/year these days belong to.
-  // Strategy: figure out the month from context if possible. The teacher
-  // pastes one month at a time, so we need a hint. For now, infer from
-  // existing entries: pick the next month that hasn't been imported yet.
-  // We assume the first day in the list is in the current month or the
-  // next month — whichever makes more sense given today's date.
-  var tz = Session.getScriptTimeZone();
-  var today = new Date();
-  var firstDay = days[0].day;
-
-  // Try this month first; if the first day is earlier than today, jump to next month.
-  var targetYear = today.getFullYear();
-  var targetMonth = today.getMonth();
-  if (firstDay < today.getDate() - 7) {
-    // First day in the menu is more than a week behind today — must be next month
-    targetMonth++;
-    if (targetMonth > 11) { targetMonth = 0; targetYear++; }
-  }
-
-  // Pull existing dates in target month so we can skip duplicates
-  var existing = {};
-  try {
-    var data = sheet.getDataRange().getValues();
-    for (var r = 1; r < data.length; r++) {
-      if (!data[r][0]) continue;
-      var d = data[r][0] instanceof Date ? data[r][0] : new Date(data[r][0]);
-      if (isNaN(d)) continue;
-      if (d.getFullYear() === targetYear && d.getMonth() === targetMonth) {
-        existing[d.getDate()] = true;
-      }
-    }
-  } catch(e) {}
-
-  var added = 0, skipped = 0;
-  var errors = [];
-  for (var di = 0; di < days.length; di++) {
-    var dy = days[di];
-    if (existing[dy.day]) { skipped++; continue; }
-    var dateObj = new Date(targetYear, targetMonth, dy.day, 12, 0, 0);
-    if (isNaN(dateObj)) {
-      errors.push('Invalid date for day ' + dy.day);
-      continue;
-    }
-    var s1 = dy.sides[0] || '';
-    var s2 = dy.sides[1] || '';
-    var s3 = dy.sides[2] || '';
-    // Anything beyond 3 sides goes into Notes
-    var extraNotes = dy.sides.slice(3).join(', ');
-    sheet.appendRow([
-      dateObj,
-      dy.main,
-      s1, s2, s3,
-      '',          // Vegetarian column — not in your PDF format
-      extraNotes
-    ]);
-    added++;
-  }
-
-  return {
-    success: true,
-    added: added,
-    skipped: skipped,
-    errors: errors,
-    targetMonth: Utilities.formatDate(new Date(targetYear, targetMonth, 1), tz, 'MMMM yyyy')
-  };
-}
 
 function repairSheetsFromApp() {
   var u = getCurrentUser();
@@ -2323,3 +2222,1111 @@ function getMyCreatedReminders() {
     return {success: false, error: e.toString(), reminders: []};
   }
 }
+
+// ─── ADMIN ───────────────────────────────────────────────────
+function adminGetAllRowAccounts() {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', accounts: []};
+    var users = getSheet('Users');
+    var accSheet = getSheet('RowAccounts');
+    if (!users) return {success: false, accounts: []};
+    var balMap = {};
+    if (accSheet) {
+      var aData = accSheet.getDataRange().getValues();
+      for (var i = 1; i < aData.length; i++) {
+        balMap[String(aData[i][0])] = Number(aData[i][1]) || 0;
+      }
+    }
+    var data = users.getDataRange().getValues();
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      var role = String(data[i][2]);
+      if (role === 'student' || role === 'teacher') {
+        out.push({
+          email: String(data[i][0]),
+          name: String(data[i][1]),
+          role: role,
+          balance: balMap[String(data[i][0])] || 0
+        });
+      }
+    }
+    out.sort(function(a, b) {
+      if (a.role !== b.role) return a.role === 'student' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return {success: true, accounts: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), accounts: []};
+  }
+}
+
+function adminAdjustRowBalance(studentEmail, delta, reason) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var d = parseInt(delta, 10);
+    if (isNaN(d) || d === 0) return {success: false, error: 'Adjustment must be a non-zero number.'};
+    if (Math.abs(d) > 100) return {success: false, error: 'Adjustment too large (max ±100).'};
+        if (!studentEmail) return {success: false, error: 'No account selected.'};
+    if (_rowDupeGuard(studentEmail, d)) return {success: false, error: 'Duplicate click ignored — that adjustment was just made.'};
+
+    var users = getSheet('Users');
+    var found = false;
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var i = 1; i < uData.length; i++) {
+        if (String(uData[i][0]) === studentEmail) { found = true; break; }
+      }
+    }
+    if (!found) return {success: false, error: 'Account not found.'};
+
+    var cur = _getRowBalance(studentEmail);
+    var newBal = Math.max(0, cur + d);
+    _setRowBalance(studentEmail, newBal);
+
+    var txSheet = getSheet('RowTransactions');
+    if (txSheet) {
+      txSheet.appendRow([
+        generateId(), studentEmail, u.email,
+        d > 0 ? 'admin_credit' : 'admin_debit',
+        Math.abs(d),
+        'Manual Adjustment',
+        String(reason || ''),
+        'completed',
+        new Date().toISOString(),
+        new Date().toISOString(),
+        ''
+      ]);
+    }
+    return {success: true, newBalance: newBal};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function adminGetAllRowTransactions(limit) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', transactions: []};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: true, transactions: []};
+    var data = sheet.getDataRange().getValues();
+
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) {
+        nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+      }
+    }
+
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      out.push({
+        id: String(data[i][0] || ''),
+        studentEmail: String(data[i][1] || ''),
+        studentName: nameMap[String(data[i][1])] || String(data[i][1]),
+        teacherEmail: String(data[i][2] || ''),
+        teacherName: nameMap[String(data[i][2])] || String(data[i][2]),
+        type: String(data[i][3] || ''),
+        amount: Number(data[i][4]) || 0,
+        category: String(data[i][5] || ''),
+        description: String(data[i][6] || ''),
+        status: String(data[i][7] || ''),
+        createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : '',
+        resolvedAt: data[i][9] ? new Date(data[i][9]).toISOString() : '',
+        comment: String(data[i][10] || '')
+      });
+    }
+    out.sort(function(a, b) {
+      var da = new Date(a.createdAt || 0).getTime();
+      var db = new Date(b.createdAt || 0).getTime();
+      return db - da;
+    });
+    var lim = parseInt(limit, 10);
+    if (!isNaN(lim) && lim > 0) out = out.slice(0, lim);
+    return {success: true, transactions: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), transactions: []};
+  }
+}
+
+function adminSpendRows(studentEmail, amount, item) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var amt = parseInt(amount, 10);
+    if (isNaN(amt) || amt < 1) return {success: false, error: 'Amount must be at least 1.'};
+    var cur = _getRowBalance(studentEmail);
+    if (amt > cur) return {success: false, error: 'Not enough ROWs (balance is ' + cur + ').'};
+    var newBal = cur - amt;
+    _setRowBalance(studentEmail, newBal);
+    var txSheet = getSheet('RowTransactions');
+    if (txSheet) {
+      txSheet.appendRow([
+        generateId(), studentEmail, u.email, 'spend',
+        amt, 'Hawk Shop', String(item || ''), 'completed',
+        new Date().toISOString(), new Date().toISOString(), ''
+      ]);
+    }
+    return {success: true, newBalance: newBal};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// TEACHER TOOLS
+// ════════════════════════════════════════════════════════════
+
+function pushAssignment(targetType, targetValue, title, subject, dueDate, priority, notes) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!title) return {success: false, error: 'Title required'};
+  var targets = [];
+  if (targetType === 'all') {
+    targets = getStudentList().map(function(s) { return s.email; });
+  } else if (targetType === 'group') {
+    var groups = getGroups();
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].name === targetValue) { targets = groups[i].emails; break; }
+    }
+  } else if (targetType === 'individual') {
+    if (targetValue) targets = [targetValue];
+  }
+  if (!targets.length) return {success: false, error: 'No targets'};
+  var count = 0;
+  for (var i = 0; i < targets.length; i++) {
+    _addTask(targets[i], title, subject, dueDate, priority, notes, u.email);
+    count++;
+  }
+  return {success: true, count: count};
+}
+
+function getStudentPlannerData(email) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {error: 'Not authorized'};
+  if (!email) return {error: 'No student email'};
+  return {
+    tasks: getTasksForEmail(email),
+    schedule: getScheduleForEmail(email).schedule,
+    notes: getNotesForEmail(email).notes,
+    links: getLinksForEmail(email).links
+  };
+}
+
+function teacherAddTaskToStudent(studentEmail, title, subject, dueDate, priority, notes) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!studentEmail || !title) return {success: false, error: 'Missing fields'};
+  return _addTask(studentEmail, title, subject, dueDate, priority, notes, u.email);
+}
+
+function teacherDeleteTask(taskId) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  return setTaskStatus(taskId, 'deleted');
+}
+
+function saveGroup(name, emailsArr) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!name) return {success: false, error: 'Group name required'};
+  var sheet = getSheet('Groups');
+  if (!sheet) return {success: false, error: 'Groups sheet missing'};
+  var emails = (emailsArr || []).join(',');
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === name) {
+      sheet.getRange(i + 1, 2).setValue(emails);
+      return {success: true};
+    }
+  }
+  sheet.appendRow([name, emails, new Date().toISOString()]);
+  return {success: true};
+}
+
+function deleteGroup(name) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  var sheet = getSheet('Groups');
+  if (!sheet) return {success: false};
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === name) {
+      sheet.deleteRow(i + 1);
+      return {success: true};
+    }
+  }
+  return {success: false, error: 'Not found'};
+}
+
+// ════════════════════════════════════════════════════════════
+// ADMIN TOOLS
+// ════════════════════════════════════════════════════════════
+
+function getDataStats() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var sheets = ss.getSheets();
+    var out = [];
+    for (var i = 0; i < sheets.length; i++) {
+      var s = sheets[i];
+      out.push({name: s.getName(), rows: Math.max(0, s.getLastRow() - 1)});
+    }
+    return {success: true, sheets: out};
+  } catch(e) {
+    return {error: e.toString()};
+  }
+}
+
+function runDataCleanup(target) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var removed = 0;
+    if (target === 'tasks_completed') {
+      var sheet = ss.getSheetByName('Tasks');
+      if (sheet) {
+        var data = sheet.getDataRange().getValues();
+        for (var i = data.length - 1; i >= 1; i--) {
+          if (data[i][6] === 'completed' || data[i][6] === 'deleted') {
+            sheet.deleteRow(i + 1); removed++;
+          }
+        }
+      }
+    } else if (target === 'tasks_deleted') {
+      var sheet = ss.getSheetByName('Tasks');
+      if (sheet) {
+        var data = sheet.getDataRange().getValues();
+        for (var i = data.length - 1; i >= 1; i--) {
+          if (data[i][6] === 'deleted') {
+            sheet.deleteRow(i + 1); removed++;
+          }
+        }
+      }
+    }
+    return {success: true, removed: removed};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+
+function repairSheetsFromApp() {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var defs = allSheetDefs();
+    var created = 0;
+    for (var name in defs) {
+      var sheet = ss.getSheetByName(name);
+      if (!sheet) {
+        sheet = ss.insertSheet(name);
+        sheet.appendRow(defs[name]);
+        sheet.setFrozenRows(1);
+        created++;
+      } else if (sheet.getLastRow() === 0) {
+        sheet.appendRow(defs[name]);
+        sheet.setFrozenRows(1);
+      }
+    }
+    return {success: true, created: created};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+function graduateStudents(emails) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!Array.isArray(emails) || !emails.length) return {success: false, error: 'No emails'};
+  try {
+    var ss = SpreadsheetApp.openById(PLANNER_SHEET_ID);
+    var emailSet = {};
+    emails.forEach(function(e) { emailSet[String(e).toLowerCase()] = true; });
+    var purgeFromSheet = function(sheetName, emailColumnIndex) {
+      var sheet = ss.getSheetByName(sheetName);
+      if (!sheet) return 0;
+      var data = sheet.getDataRange().getValues();
+      var removed = 0;
+      for (var i = data.length - 1; i >= 1; i--) {
+        if (emailSet[String(data[i][emailColumnIndex] || '').toLowerCase()]) {
+          sheet.deleteRow(i + 1); removed++;
+        }
+      }
+      return removed;
+    };
+    var report = {};
+    report.users = purgeFromSheet('Users', 0);
+    report.tasks = purgeFromSheet('Tasks', 1);
+    report.schedule = purgeFromSheet('Schedule', 0);
+    report.notes = purgeFromSheet('Notes', 0);
+    report.links = purgeFromSheet('Links', 0);
+    report.prefs = purgeFromSheet('Prefs', 0);
+    report.rowAccounts = purgeFromSheet('RowAccounts', 0);
+    report.rowTransactions = purgeFromSheet('RowTransactions', 1);
+    return {success: true, report: report};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// allSheetDefs is needed by repairSheetsFromApp — keep it in the library
+function allSheetDefs() {
+  return {
+    'Config':     ['Key','Value'],
+    'Users':      ['Email','Name','Role','Group','RegisteredAt'],
+    'Tasks':      ['ID','AssignedTo','Title','Subject','DueDate','Priority','Status','Notes','AssignedBy','CreatedAt'],
+    'Groups':     ['GroupName','Emails','CreatedAt'],
+    'Schedule':   ['Email','Period','Subject','Teacher','Room','StartTime','EndTime','ExtraJSON'],
+    'Notes':      ['Email','Content','UpdatedAt'],
+    'Links':      ['Email','LinksJSON'],
+    'Prefs':      ['Email','PrefsJSON'],
+    'AssignedLinks': ['ID','AssignedTo','Label','URL','IconUrl','AssignedBy','AssignedAt'],
+    'LunchMenu':  ['Date','Main','Side1','Side2','Side3','Vegetarian','Notes'],
+    'EmbeddedDocs':['ID','AssignedTo','Title','URL','DocType','AssignedBy','AssignedAt'],
+    'RowAccounts':['Email','Balance','UpdatedAt'],
+    'RowTransactions':['ID','StudentEmail','TeacherEmail','Type','Amount','Category','Description','Status','CreatedAt','ResolvedAt','Comment'],
+    'BellSchedules':['ID','Name','IsDefault','PeriodsJSON','Color','CreatedAt'],
+    'ScheduleCalendar':['Date','BellScheduleID','DayType','Notes'],
+    'BellScheduleConfig':['Key','Value']
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+// CALENDAR LIST
+// ════════════════════════════════════════════════════════════
+
+function getMyCalendars() {
+  try {
+    var cals = [];
+    if (typeof Calendar !== 'undefined' && Calendar.CalendarList) {
+      var list = Calendar.CalendarList.list({minAccessRole: 'reader', maxResults: 50});
+      if (list && list.items) {
+        list.items.forEach(function(c) {
+          cals.push({
+            id: c.id,
+            name: c.summary || c.id,
+            color: c.backgroundColor || '#6366f1',
+            primary: !!c.primary
+          });
+        });
+        cals.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+        return cals;
+      }
+    }
+    var calApp = CalendarApp.getAllCalendars();
+    calApp.forEach(function(c) {
+      cals.push({
+        id: c.getId(),
+        name: c.getName(),
+        color: c.getColor() || '#6366f1',
+        primary: c.getId() === getEmail()
+      });
+    });
+    cals.sort(function(a, b) { return (b.primary ? 1 : 0) - (a.primary ? 1 : 0); });
+    return cals;
+  } catch(e) {
+    var email = getEmail();
+    return [{id: email, name: 'My Calendar', color: '#6366f1', primary: true}];
+  }
+}
+
+// ─── ROW AWARD (teacher gives ROWs directly, no student request) ───
+// Writes a proper category so R/O/W reporting stays clean, unlike
+// adminAdjustRowBalance which logs everything as "Manual Adjustment".
+function awardRow(studentEmail, amount, category, description) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+
+    var amt = parseInt(amount, 10);
+    if (isNaN(amt) || amt < 1 || amt > 10) return {success: false, error: 'Amount must be 1–10.'};
+    if (!studentEmail) return {success: false, error: 'Pick a student.'};
+    if (!category)     return {success: false, error: 'Pick a category.'};
+
+    var users = getSheet('Users');
+    var okStudent = false;
+    var studentName = studentEmail;
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var i = 1; i < uData.length; i++) {
+        if (String(uData[i][0]) === studentEmail && String(uData[i][2]) === 'student') {
+          okStudent = true;
+          studentName = String(uData[i][1] || studentEmail);
+          break;
+        }
+      }
+    }
+    if (!okStudent) return {success: false, error: 'Student not found.'};
+
+    var txSheet = getSheet('RowTransactions');
+    if (!txSheet) return {success: false, error: 'RowTransactions sheet missing — run Repair Sheets.'};
+
+        var newBal = _addRowBalance(studentEmail, amt);
+
+    var now = new Date().toISOString();
+    txSheet.appendRow([
+      generateId(), studentEmail, u.email, 'award',
+      amt, String(category), String(description || ''),
+      'approved', now, now, ''
+    ]);
+
+    return {success: true, newBalance: newBal, studentName: studentName};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── ADMIN REMINDER MANAGEMENT ───────────────────────────────
+// Every pushed reminder from every teacher, so an admin can clean up
+// or correct anything school-wide. Self-reminders are excluded.
+function adminGetAllSentReminders() {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized', reminders: []};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: true, reminders: []};
+    var data = sheet.getDataRange().getValues();
+
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+    }
+
+    var out = [];
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      var src = String(data[i][3] || '');
+      if (src !== 'admin' && src !== 'teacher') continue;
+      var by = String(data[i][1] || '');
+      out.push({
+        id: String(data[i][0]),
+        createdBy: by,
+        createdByName: nameMap[by] || by,
+        assignedTo: String(data[i][2] || ''),
+        source: src,
+        title: String(data[i][4] || ''),
+        body: String(data[i][5] || ''),
+        triggerAt: data[i][6] ? new Date(data[i][6]).toISOString() : '',
+        createdAt: data[i][10] ? new Date(data[i][10]).toISOString() : ''
+      });
+    }
+    out.sort(function(a, b) {
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+    return {success: true, reminders: out};
+  } catch(e) {
+    return {success: false, error: e.toString(), reminders: []};
+  }
+}
+
+function adminUpdateReminder(id, title, body, triggerAt) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    if (!String(title || '').trim()) return {success: false, error: 'Title is required.'};
+    var sheet = getSheet('Reminders');
+    if (!sheet) return {success: false, error: 'Reminders sheet missing'};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        sheet.getRange(i + 1, 5).setValue(String(title).trim());
+        sheet.getRange(i + 1, 6).setValue(String(body || ''));
+        if (triggerAt) sheet.getRange(i + 1, 7).setValue(String(triggerAt));
+        return {success: true};
+      }
+    }
+    return {success: false, error: 'Reminder not found.'};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── APP FLAGS (school-wide on/off switches, stored in Config) ───
+// Keys are prefixed FLAG_ so they never collide with existing Config rows.
+function getAppFlags() {
+  try {
+    var sheet = getSheet('Config');
+    if (!sheet) return {success: true, flags: {}};
+    var data = sheet.getDataRange().getValues();
+    var flags = {};
+    for (var i = 0; i < data.length; i++) {
+      var k = String(data[i][0] || '');
+      if (k.indexOf('FLAG_') === 0) {
+        flags[k.substring(5)] = String(data[i][1]).toLowerCase() === 'true';
+      }
+    }
+    return {success: true, flags: flags};
+  } catch(e) {
+    return {success: false, error: e.toString(), flags: {}};
+  }
+}
+
+function setAppFlag(name, on) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var sheet = getSheet('Config');
+    if (!sheet) return {success: false, error: 'Config sheet missing'};
+    var key = 'FLAG_' + String(name).replace(/[^A-Za-z0-9_]/g, '');
+    var val = on ? 'TRUE' : 'FALSE';
+    var data = sheet.getDataRange().getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0]) === key) {
+        sheet.getRange(i + 1, 2).setValue(val);
+        return {success: true, name: name, on: !!on};
+      }
+    }
+    sheet.appendRow([key, val]);
+    return {success: true, name: name, on: !!on};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── GRADING PERIODS (school-wide date ranges, stored in Config) ───
+// One Config row, GRADING_PERIODS, holding a JSON array of
+// {id, name, start, end}. Read by any report that needs a date range.
+function getGradingPeriods() {
+  try {
+    var sheet = getSheet('Config');
+    if (!sheet) return {success: true, periods: []};
+    var data = sheet.getDataRange().getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0]) === 'GRADING_PERIODS') {
+        var raw = String(data[i][1] || '');
+        if (!raw) return {success: true, periods: []};
+        try { return {success: true, periods: JSON.parse(raw)}; }
+        catch(e) { return {success: true, periods: []}; }
+      }
+    }
+    return {success: true, periods: []};
+  } catch(e) {
+    return {success: false, error: e.toString(), periods: []};
+  }
+}
+
+function setGradingPeriods(periodsJson) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+
+    var parsed;
+    try { parsed = JSON.parse(periodsJson); }
+    catch(e) { return {success: false, error: 'Could not read the periods.'}; }
+    if (!Array.isArray(parsed)) return {success: false, error: 'Could not read the periods.'};
+
+    for (var i = 0; i < parsed.length; i++) {
+      var p = parsed[i];
+      var nm = String(p.name || '').trim();
+      if (!nm) return {success: false, error: 'Every period needs a name.'};
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(p.start || ''))) return {success: false, error: 'Pick a start date for "' + nm + '".'};
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(p.end   || ''))) return {success: false, error: 'Pick an end date for "' + nm + '".'};
+      if (String(p.end) < String(p.start)) return {success: false, error: '"' + nm + '" ends before it starts.'};
+    }
+
+    var clean = parsed.map(function(p, i) {
+      return {
+        id:    String(p.id || ('gp-' + Date.now() + '-' + i)),
+        name:  String(p.name).trim(),
+        start: String(p.start),
+        end:   String(p.end)
+      };
+    });
+    clean.sort(function(a, b) { return a.start.localeCompare(b.start); });
+
+    var sheet = getSheet('Config');
+    if (!sheet) return {success: false, error: 'Config sheet missing'};
+    var val = JSON.stringify(clean);
+    var data = sheet.getDataRange().getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0]) === 'GRADING_PERIODS') {
+        sheet.getRange(i + 1, 2).setValue(val);
+        return {success: true, periods: clean};
+      }
+    }
+    sheet.appendRow(['GRADING_PERIODS', val]);
+    return {success: true, periods: clean};
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── ROW REPORTS ─────────────────────────────────────────────
+// One pass over RowTransactions, aggregated server-side so the browser
+// gets a few KB instead of the whole sheet. Dates are YYYY-MM-DD,
+// inclusive on both ends. A ROW counts on the day it was approved or
+// awarded, not requested.
+
+// Grade from the graduation year in the email (jdoe32@ = class of 2032),
+// with the school year flipping in August.
+function _reportGradeOf(email) {
+  var local = String(email || '').split('@')[0];
+  var m = local.match(/(\d{2})$/);
+  if (!m) return null;
+  var gradYear = 2000 + parseInt(m[1], 10);
+  var now = new Date();
+  var yearEnd = now.getMonth() >= 7 ? now.getFullYear() + 1 : now.getFullYear();
+  var grade = 12 - (gradYear - yearEnd);
+  return (grade >= 1 && grade <= 12) ? grade : null;
+}
+
+function getRowReport(startDate, endDate) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+
+    var start = String(startDate || '');
+    var end   = String(endDate   || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+      return {success: false, error: 'Bad date range.'};
+    }
+
+    // ── Roster + balances ──
+    var users = getSheet('Users');
+    if (!users) return {success: false, error: 'Users sheet missing'};
+    var uData = users.getDataRange().getValues();
+
+    var nameMap = {}, roleMap = {};
+    var studentList = [];
+    for (var i = 1; i < uData.length; i++) {
+      var em = String(uData[i][0] || '');
+      if (!em) continue;
+      nameMap[em] = String(uData[i][1] || em);
+      roleMap[em] = String(uData[i][2] || '');
+      if (roleMap[em] === 'student') {
+        studentList.push({email: em, name: nameMap[em], grade: _reportGradeOf(em)});
+      }
+    }
+
+    var balMap = {};
+    var accSheet = getSheet('RowAccounts');
+    if (accSheet) {
+      var aData = accSheet.getDataRange().getValues();
+      for (var i = 1; i < aData.length; i++) balMap[String(aData[i][0])] = Number(aData[i][1]) || 0;
+    }
+
+    // ── Single pass over transactions ──
+    var byTeacher = {}, byStudent = {}, byGrade = {};
+    var totals = {earned: 0, spent: 0, adjust: 0, count: 0, pending: 0};
+
+    var tx = getSheet('RowTransactions');
+    var data = tx ? tx.getDataRange().getValues() : [];
+
+    for (var i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      var studentEmail = String(data[i][1] || '');
+      var teacherEmail = String(data[i][2] || '');
+      var type         = String(data[i][3] || '');
+      var amount       = Number(data[i][4]) || 0;
+      var status       = String(data[i][7] || '');
+
+      // Date the ROW actually landed
+      var when = data[i][9] || data[i][8];
+      if (!when) continue;
+      var d = String(new Date(when).toISOString()).slice(0, 10);
+      if (d < start || d > end) continue;
+
+      if (status === 'pending') { totals.pending++; continue; }
+      if (status === 'denied') continue;
+
+      var isCredit = (type === 'award') || (type === 'request' && status === 'approved') || (type === 'admin_credit');
+      var isSpend  = (type === 'spend');
+      var isDebit  = (type === 'admin_debit');
+      if (!isCredit && !isSpend && !isDebit) continue;
+
+      if (!byStudent[studentEmail]) byStudent[studentEmail] = {earned: 0, spent: 0, adjust: 0};
+
+      if (isCredit) {
+        totals.earned += amount;
+        totals.count++;
+        byStudent[studentEmail].earned += amount;
+        if (type === 'admin_credit') byStudent[studentEmail].adjust += amount;
+
+        if (teacherEmail) {
+          if (!byTeacher[teacherEmail]) byTeacher[teacherEmail] = {approved: 0, awarded: 0, total: 0, students: {}};
+          if (type === 'request') byTeacher[teacherEmail].approved += amount;
+          else                     byTeacher[teacherEmail].awarded  += amount;
+          byTeacher[teacherEmail].total += amount;
+          byTeacher[teacherEmail].students[studentEmail] = true;
+        }
+
+        var g = _reportGradeOf(studentEmail);
+        var gk = g ? String(g) : 'other';
+        if (!byGrade[gk]) byGrade[gk] = {rows: 0, students: {}};
+        byGrade[gk].rows += amount;
+        byGrade[gk].students[studentEmail] = true;
+      } else if (isSpend) {
+        totals.spent += amount;
+        byStudent[studentEmail].spent += amount;
+      } else {
+        totals.adjust -= amount;
+        byStudent[studentEmail].adjust -= amount;
+      }
+    }
+
+    // ── Shape the output ──
+    var teachers = Object.keys(byTeacher).map(function(em) {
+      return {
+        email: em,
+        name: nameMap[em] || em,
+        approved: byTeacher[em].approved,
+        awarded: byTeacher[em].awarded,
+        total: byTeacher[em].total,
+        studentsReached: Object.keys(byTeacher[em].students).length
+      };
+    });
+    // Staff who gave nothing in range still belong in the report
+    for (var em in roleMap) {
+      if (roleMap[em] === 'teacher' && !byTeacher[em]) {
+        teachers.push({email: em, name: nameMap[em] || em, approved: 0, awarded: 0, total: 0, studentsReached: 0});
+      }
+    }
+    teachers.sort(function(a, b) { return b.total - a.total || a.name.localeCompare(b.name); });
+
+    var grades = ['6','7','8','other'].filter(function(k) { return byGrade[k]; }).map(function(k) {
+      var inGrade = studentList.filter(function(s) { return (s.grade ? String(s.grade) : 'other') === k; });
+      var reached = Object.keys(byGrade[k].students).length;
+      return {
+        grade: k,
+        rows: byGrade[k].rows,
+        studentsWithRows: reached,
+        studentsTotal: inGrade.length,
+        studentsWithNone: Math.max(0, inGrade.length - reached)
+      };
+    });
+
+    var students = studentList.map(function(s) {
+      var b = byStudent[s.email] || {earned: 0, spent: 0, adjust: 0};
+      var current = balMap[s.email] || 0;
+      var expected = b.earned - b.spent;
+      return {
+        email: s.email,
+        name: s.name,
+        grade: s.grade,
+        earned: b.earned,
+        spent: b.spent,
+        adjust: b.adjust,
+        current: current,
+        mismatch: (expected !== current)
+      };
+    });
+    students.sort(function(a, b) { return a.earned - b.earned || a.name.localeCompare(b.name); });
+
+    return {
+      success: true,
+      range: {start: start, end: end},
+      totals: {
+        earned: totals.earned,
+        spent: totals.spent,
+        adjust: totals.adjust,
+        awards: totals.count,
+        pending: totals.pending,
+        studentsTotal: studentList.length,
+        studentsWithNone: students.filter(function(s) { return s.earned === 0; }).length
+      },
+      teachers: teachers,
+      grades: grades,
+      students: students,
+      generatedAt: new Date().toISOString()
+    };
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// ─── LUNCH IMPORT v2 ─────────────────────────────────────────
+// Handles the real PDF layout: the day number sits on its own line,
+// items follow beneath it, and there's no "Milk" terminator. Days with
+// no school collapse onto one line ("3 4 5 6 7") — the last number on
+// such a line owns whatever items come next.
+
+function _parseLunchText(rawText) {
+  var MONTHS = ['january','february','march','april','may','june',
+                'july','august','september','october','november','december'];
+
+  var lines = String(rawText).split(/\r?\n/)
+    .map(function(s){ return s.replace(/\s+/g,' ').trim(); })
+    .filter(Boolean);
+
+  var month = -1, year = 0;
+  var days = [], current = null;
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+
+    // Month/year header, e.g. "August 2026"
+    var mh = line.match(/^([A-Za-z]+)\s+(\d{4})$/);
+    if (mh) {
+      var mi = MONTHS.indexOf(mh[1].toLowerCase());
+      if (mi > -1) { month = mi; year = parseInt(mh[2], 10); continue; }
+    }
+
+    // Boilerplate
+    if (/lunch menu$/i.test(line)) continue;
+    if (/^MONDAY\b/i.test(line) && /FRIDAY/i.test(line)) continue;
+    if (/subject to change/i.test(line)) continue;
+    if (/milk choice/i.test(line)) continue;
+    if (/chef salad|PB&J|alternative to the hot lunch/i.test(line)) continue;
+    if (/^milk$/i.test(line)) continue;
+
+    // A line of nothing but numbers = day markers. Earlier numbers are
+    // days with no menu; the last one starts the day being described.
+    if (/^\d{1,2}(\s+\d{1,2})*$/.test(line)) {
+      var nums = line.split(/\s+/).map(Number).filter(function(n){ return n >= 1 && n <= 31; });
+      if (!nums.length) continue;
+      if (current && current.items.length) days.push(current);
+      current = {day: nums[nums.length - 1], items: []};
+      continue;
+    }
+
+    // Anything else is a menu item for the current day
+    if (current) current.items.push(line);
+  }
+  if (current && current.items.length) days.push(current);
+
+  if (!days.length) {
+    return {error: 'No menu days found. Each day should have its number on its own line, with the food items on the lines below it.'};
+  }
+  if (month < 0) {
+    return {error: 'Could not find the month. Make sure a line like "August 2026" is included in what you paste.'};
+  }
+  return {month: month, year: year, days: days};
+}
+
+function importLunchData(rawText) {
+  var u = getCurrentUser();
+  if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+  if (!rawText || typeof rawText !== 'string') return {success: false, error: 'No text provided'};
+
+  var sheet = getSheet('LunchMenu');
+  if (!sheet) return {success: false, error: 'LunchMenu sheet missing — run Repair Sheets.'};
+
+  var parsed = _parseLunchText(rawText);
+  if (parsed.error) return {success: false, error: parsed.error};
+
+  // Drop menu data older than 60 days so the sheet doesn't grow forever
+  try {
+    var cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 60);
+    var allData = sheet.getDataRange().getValues();
+    for (var r = allData.length - 1; r >= 1; r--) {
+      var dv = allData[r][0];
+      if (!dv) continue;
+      var dd = dv instanceof Date ? dv : new Date(dv);
+      if (!isNaN(dd) && dd < cutoff) sheet.deleteRow(r + 1);
+    }
+  } catch(e) {}
+
+  // Which dates already exist?
+  var existing = {};
+  try {
+    var cur = sheet.getDataRange().getValues();
+    for (var i = 1; i < cur.length; i++) {
+      var v = cur[i][0];
+      if (!v) continue;
+      var s = (v instanceof Date)
+        ? Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd')
+        : String(v).slice(0, 10);
+      existing[s] = true;
+    }
+  } catch(e) {}
+
+  var added = 0, skipped = 0, errors = [];
+  var MN = ['January','February','March','April','May','June',
+            'July','August','September','October','November','December'];
+
+  parsed.days.forEach(function(d) {
+    var dateStr = parsed.year + '-' + String(parsed.month + 1).padStart(2,'0') + '-' + String(d.day).padStart(2,'0');
+    if (existing[dateStr]) { skipped++; return; }
+    if (!d.items.length) { return; }
+
+    // First item is the main; the next four fill the side/veg columns;
+    // anything beyond that gets folded into notes.
+    var items = d.items.slice();
+    var main  = items.shift();
+    var s1 = items.shift() || '';
+    var s2 = items.shift() || '';
+    var s3 = items.shift() || '';
+    var vg = items.shift() || '';
+    var notes = items.join(', ');
+
+    try {
+      sheet.appendRow([dateStr, main, s1, s2, s3, vg, notes]);
+      existing[dateStr] = true;
+      added++;
+    } catch(e) {
+      errors.push('Day ' + d.day + ': ' + e.toString());
+    }
+  });
+
+  return {
+    success: true,
+    added: added,
+    skipped: skipped,
+    errors: errors,
+    targetMonth: MN[parsed.month] + ' ' + parsed.year
+  };
+}
+
+// Preview only — parses without writing anything to the sheet.
+function TEST_lunchParse() {
+  var sample =
+'K-8 LUNCH MENU\n' +
+'August 2026\n' +
+'MONDAY TUESDAY WEDNESDAY THURSDAY FRIDAY\n' +
+'3 4 5 6 7\n' +
+'10 11 12 13\n' +
+'Max Sticks with Sauce\nCorn\nRomaine Salad\nPeaches\n' +
+'14\nHamburger\nBun\nTater tots\nApplesauce\nCucumbers\n' +
+'17\nMini Corn Dogs\nBaked Beans\nRaw Broccoli\nPineapple\nCheese Stick';
+  Logger.log(JSON.stringify(_parseLunchText(sample), null, 2));
+}
+
+// ─── ROW ADMIN: single-student detail ────────────────────────
+// Does a transaction move the balance, and which way?
+function _rowTxEffect(type, status, amount) {
+  var amt = Number(amount) || 0;
+  if (status === 'pending' || status === 'denied') return 0;
+  if (type === 'award' || type === 'admin_credit') return amt;
+  if (type === 'request' && status === 'approved') return amt;
+  if (type === 'spend' || type === 'admin_debit') return -amt;
+  return 0;
+}
+
+function adminGetStudentRowDetail(studentEmail) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    if (!studentEmail) return {success: false, error: 'No student selected.'};
+
+    var users = getSheet('Users');
+    var nameMap = {};
+    if (users) {
+      var uData = users.getDataRange().getValues();
+      for (var k = 1; k < uData.length; k++) nameMap[String(uData[k][0])] = String(uData[k][1] || '');
+    }
+
+    var out = [], earned = 0, spent = 0;
+    var sheet = getSheet('RowTransactions');
+    if (sheet) {
+      var data = sheet.getDataRange().getValues();
+      for (var i = 1; i < data.length; i++) {
+        if (String(data[i][1]) !== studentEmail) continue;
+        var type = String(data[i][3] || ''), status = String(data[i][7] || '');
+        var amt = Number(data[i][4]) || 0;
+        var eff = _rowTxEffect(type, status, amt);
+        if (eff > 0) earned += eff; else if (eff < 0) spent += -eff;
+        out.push({
+          id: String(data[i][0] || ''),
+          teacherEmail: String(data[i][2] || ''),
+          teacherName: nameMap[String(data[i][2])] || String(data[i][2] || ''),
+          type: type,
+          amount: amt,
+          category: String(data[i][5] || ''),
+          description: String(data[i][6] || ''),
+          status: status,
+          createdAt: data[i][8] ? new Date(data[i][8]).toISOString() : '',
+          resolvedAt: data[i][9] ? new Date(data[i][9]).toISOString() : '',
+          effect: eff
+        });
+      }
+    }
+    out.sort(function(a, b) {
+      return new Date(b.resolvedAt || b.createdAt || 0).getTime()
+           - new Date(a.resolvedAt || a.createdAt || 0).getTime();
+    });
+
+    return {
+      success: true,
+      email: studentEmail,
+      name: nameMap[studentEmail] || studentEmail,
+      balance: _getRowBalance(studentEmail),
+      earned: earned,
+      spent: spent,
+      transactions: out
+    };
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Delete a transaction and back out whatever it did to the balance.
+function adminDeleteRowTransaction(txId) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var sheet = getSheet('RowTransactions');
+    if (!sheet) return {success: false, error: 'RowTransactions sheet missing'};
+
+    var lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try {
+      var data = sheet.getDataRange().getValues();
+      for (var i = 1; i < data.length; i++) {
+        if (String(data[i][0]) !== String(txId)) continue;
+        var studentEmail = String(data[i][1] || '');
+        var eff = _rowTxEffect(String(data[i][3]), String(data[i][7]), data[i][4]);
+        sheet.deleteRow(i + 1);
+        SpreadsheetApp.flush();
+        var newBal = eff ? _addRowBalance(studentEmail, -eff) : _getRowBalance(studentEmail);
+        return {success: true, newBalance: newBal, reversed: eff};
+      }
+      return {success: false, error: 'Transaction not found.'};
+    } finally {
+      lock.releaseLock();
+    }
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+
+// Set a balance to an exact number, logging the difference for the audit trail.
+function adminSetRowBalance(studentEmail, newBalance, reason) {
+  try {
+    var u = getCurrentUser();
+    if (u.realRole !== 'teacher') return {success: false, error: 'Not authorized'};
+    var target = parseInt(newBalance, 10);
+    if (isNaN(target) || target < 0) return {success: false, error: 'Balance must be zero or more.'};
+    if (target > 10000) return {success: false, error: 'That balance is too large.'};
+    if (!studentEmail) return {success: false, error: 'No account selected.'};
+
+    var lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try {
+      var cur = _getRowBalance(studentEmail);
+      var delta = target - cur;
+      if (delta === 0) return {success: true, newBalance: cur, delta: 0};
+      _setRowBalance(studentEmail, target);
+
+      var txSheet = getSheet('RowTransactions');
+      if (txSheet) {
+        var now = new Date().toISOString();
+        txSheet.appendRow([
+          generateId(), studentEmail, u.email,
+          delta > 0 ? 'admin_credit' : 'admin_debit',
+          Math.abs(delta), 'Manual Adjustment',
+          String(reason || ('Balance set to ' + target)),
+          'completed', now, now, ''
+        ]);
+      }
+      return {success: true, newBalance: target, delta: delta};
+    } finally {
+      lock.releaseLock();
+    }
+  } catch(e) {
+    return {success: false, error: e.toString()};
+  }
+}
+

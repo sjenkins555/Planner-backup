@@ -94,7 +94,16 @@ function buildHomePage(){
 function renderTileGrid(){
   var grid = document.getElementById('tile-grid');
   if (!grid) return;
-  var order = prefs.tileOrder || ['clock','schedule','tasks','notes','links'];
+  // ROW Approvals belongs on the Teacher Tools tab, not the home grid.
+  // Older saved layouts may still list it, so strip it out and persist
+  // the cleaned-up order so it doesn't come back.
+  var HOME_EXCLUDED = {rowapprovals:1};
+  var rawOrder = prefs.tileOrder || ['clock','schedule','tasks','notes','links'];
+  var order = rawOrder.filter(function(id){ return !HOME_EXCLUDED[id]; });
+  if (order.length !== rawOrder.length){
+    prefs.tileOrder = order.slice();
+    google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  }
   var positions = prefs.tilePositions || {};
 
   // Auto-assign positions to any widgets that don't have one yet (legacy migration)
@@ -158,8 +167,6 @@ function renderTileGrid(){
       wh = '<div class="card"><div style="color:#ef4444;font-size:12px;">Widget error: ' + e.message + '</div></div>';
     }
 
-    var isMin = prefs.minimizedWidgets && prefs.minimizedWidgets.indexOf(id) > -1;
-
     var wlabel;
     if (id.startsWith('embed-')){
       var _ed = null;
@@ -182,10 +189,8 @@ function renderTileGrid(){
     var minH = (rowSpan * 160) + ((rowSpan - 1) * 14);
     var pos = positions[id] || {col:1, row:1};
 
-    return '<div class="tile' + (isMin ? ' minimized' : '') + '" id="tile-' + id + '" draggable="true" data-tile="' + id
+    return '<div class="tile" id="tile-' + id + '" data-tile="' + id
       + '" style="grid-column:' + pos.col + ' / span ' + colSpan + ';grid-row:' + pos.row + ' / span ' + rowSpan + ';min-height:' + minH + 'px;">'
-      + '<div class="tile-min-bar" onclick="toggleMinimize(\'' + id + '\')">' + wlabel + '</div>'
-      + '<div class="min-btn" onclick="toggleMinimize(\'' + id + '\')" title="' + (isMin ? 'Expand' : 'Collapse') + '"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (isMin ? '<path d="M3 10l5-5 5 5"/>' : '<path d="M3 6l5 5 5-5"/>') + '</svg></div>'
       + '<div class="tile-gear" onclick="flipToCustomize(\'' + id + '\')" title="Widget settings"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2"/><path d="M8 2v1.5M8 12.5V14M14 8h-1.5M3.5 8H2M12.2 3.8l-1 1M4.8 11.2l-1 1M12.2 12.2l-1-1M4.8 4.8l-1-1"/></svg></div>'
       + '<div class="card-shell">'
       +   '<div class="face face-front">' + wh + '</div>'
@@ -201,6 +206,7 @@ function renderTileGrid(){
   if (order.indexOf('lunch')        > -1) loadLunchMenu();
   if (order.indexOf('scores')       > -1) setTimeout(renderScoresChart, 80);
   if (order.indexOf('rowbank')      > -1) loadMyRows();
+  if (order.indexOf('rowapprovals') > -1) loadRowApprovals();
   if (order.indexOf('reminders')    > -1) loadReminders();
 
   var ta = document.getElementById('notes-ta');
@@ -220,7 +226,6 @@ function renderTileGrid(){
   });
 
   applyAllWidgetStyles();
-  initDragDrop();
 }
 
 // Reconcile embed tiles against the current myEmbeddedDocs list. Removes
@@ -419,8 +424,7 @@ var WIDGET_HTML = {
     var vw = prefs.weatherView || 'today';
     var vtabs = '<div style="display:flex;gap:4px;margin-bottom:10px;">'
       + '<button class="btn btn-sm weather-vbtn ' + (vw === 'today' ? 'btn-primary' : 'btn-ghost') + '" data-view="today" onclick="setWeatherView(this.dataset.view)">Today</button>'
-      + '<button class="btn btn-sm weather-vbtn ' + (vw === '5day'  ? 'btn-primary' : 'btn-ghost') + '" data-view="5day"  onclick="setWeatherView(this.dataset.view)">5-Day</button>'
-      + '<button class="btn btn-sm weather-vbtn ' + (vw === '10day' ? 'btn-primary' : 'btn-ghost') + '" data-view="10day" onclick="setWeatherView(this.dataset.view)">10-Day</button>'
+      + '<button class="btn btn-sm weather-vbtn ' + (vw === '5day'  ? 'btn-primary' : 'btn-ghost') + '" data-view="5day"  onclick="setWeatherView(this.dataset.view)">7-Day</button>'
       + '</div>';
     return '<div class="card"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-weather"/></svg> Weather</div></div>' + vtabs + '<div id="weather-body">' + renderWeatherInit() + '</div></div>';
   },
@@ -482,9 +486,9 @@ var WIDGET_HTML = {
     var goal    = data.goal ? Number(data.goal) : null;
     var entries = data.entries || {};
     var hasData = Object.keys(entries).length > 0;
-    var goalTag = goal ? '<span style="font-size:11px;color:var(--a2);background:var(--a5);border:1px solid var(--a4);border-radius:99px;padding:2px 9px;font-weight:600;">Goal: ' + goal + ' L</span>' : '';
+    var goalTag = goal ? '<span style="font-size:11px;color:var(--a2);background:var(--a5);border:1px solid var(--a4);border-radius:99px;padding:2px 9px;font-weight:600;">Goal: ' + goal + '</span>' : '';
     return '<div class="card" style="display:flex;flex-direction:column;height:100%;">'
-      + '<div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-chart"/></svg> Lexile Scores</div>' + goalTag + '</div>'
+      + '<div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-chart"/></svg> Test Scores</div>' + goalTag + '</div>'
       + (hasData
           ? '<div id="scores-chart" style="flex:1;min-height:0;overflow:hidden;"></div>'
           : '<div id="scores-chart" style="flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;"><div class="empty"><p style="font-size:12px;">Click the gear to edit scores.</p></div></div>')
@@ -505,6 +509,11 @@ var WIDGET_HTML = {
   reminders: function(){
     return '<div class="card" style="display:flex;flex-direction:column;height:100%;"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-timer"/></svg> Reminders</div><div style="display:flex;gap:5px;"><button class="btn btn-ghost btn-sm" onclick="loadReminders()" title="Refresh"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button><button class="btn btn-primary btn-sm" onclick="flipWidget(\'reminders\')" style="font-size:11px;padding:4px 10px;">+ Add</button></div></div><div id="reminders-area" style="flex:1;min-height:0;overflow:hidden;"><div class="rem-empty">Loading...</div></div></div>';
   },
+
+  // ── ROW APPROVALS (teacher) ── pending request list; populated by loadRowApprovals
+  rowapprovals: function(){
+    return '<div class="card" style="display:flex;flex-direction:column;height:100%;"><div class="card-top"><div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="#w-rowoars"/></svg> ROW Approvals</div><div style="display:flex;gap:4px;"><button class="btn btn-ghost btn-sm" onclick="openRowHistoryModal()" title="View past approvals">History</button><button class="btn btn-ghost btn-sm" onclick="loadRowApprovals()" title="Refresh"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button></div></div><div id="row-approvals-body" style="flex:1;min-height:0;overflow:hidden;"><div class="empty"><p style="font-size:12px;">Loading...</p></div></div></div>';
+  }
 };
 
 
@@ -530,7 +539,7 @@ var ALL_WIDGETS = [
   {id:'spotify',      icon:'&#127925;', name:'Spotify',           desc:'Embedded music player',                             isDefault:false},
   {id:'stocks',       icon:'&#128200;', name:'Stock Chart',       desc:'TradingView live chart',                            isDefault:false},
   {id:'lunch',        icon:'&#127829;', name:'Lunch Menu',        desc:'Weekly school lunch menu',                          isDefault:false},
-  {id:'scores',       icon:'&#128200;', name:'Lexile Scores',     desc:'State testing score tracker',                       isDefault:false},
+  {id:'scores',       icon:'&#128200;', name:'Test Scores',       desc:'RIT score tracker with grade-level norms',          isDefault:false},
   {id:'rowbank',      icon:'&#127942;', name:'My ROWs',           desc:'ROW Reward balance & requests',                     isDefault:false},
   {id:'reminders',    icon:'&#9200;',   name:'Reminders',         desc:'Active reminders from teachers, school & you',      isDefault:false}
 ];
@@ -553,6 +562,7 @@ var DEF_TILE_SIZES = {
   lunch:        {c:2, r:1},
   scores:       {c:2, r:2},
   rowbank:      {c:2, r:2},
+  rowapprovals: {c:2, r:2},
   reminders:    {c:2, r:2}
 };
 
@@ -565,43 +575,25 @@ var DEF_TILE_SIZES = {
 
 // User clicked a tile's gear → flip to style/customize panel.
 // If the widget has both an Edit and Style tab, open Style by default.
+// Gear click → open the back face. Lands on Edit when the widget has one
+// (that's what people actually want); Style-only widgets go straight to Style.
 function flipToCustomize(id){
-  _flipMode[id] = 'style';
+  var hasEdit = !!HAS_EDIT_TAB[id];
+  var tab = hasEdit ? 'edit' : 'style';
+  _flipMode[id] = hasEdit ? 'default' : 'style';
   var tile = document.getElementById('tile-' + id);
   if (!tile) return;
   var back = document.getElementById('tb-' + id);
   if (!back) return;
-  back.innerHTML = buildBackPanel(id, 'style');
+  back.innerHTML = buildBackPanel(id, tab);
   tile.classList.add('flipped');
-  setTimeout(function(){ attachStyleListeners(id); }, 10);
+  if (tab === 'style') setTimeout(function(){ attachStyleListeners(id); }, 10);
 }
 
 // Flip the back face away — used by Cancel buttons everywhere.
 function unflipWidget(id){
   var tile = document.getElementById('tile-' + id);
   if (tile) tile.classList.remove('flipped');
-}
-
-// Toggle a widget's minimized state. Updates prefs, the tile's class,
-// and the chevron direction on the minimize button.
-function toggleMinimize(id){
-  if (!prefs.minimizedWidgets) prefs.minimizedWidgets = [];
-  var idx = prefs.minimizedWidgets.indexOf(id);
-  if (idx > -1) prefs.minimizedWidgets.splice(idx, 1);
-  else          prefs.minimizedWidgets.push(id);
-
-  var tile = document.getElementById('tile-' + id);
-  if (tile){
-    var isMin = prefs.minimizedWidgets.indexOf(id) > -1;
-    tile.classList.toggle('minimized', isMin);
-    // Update the chevron: down arrow when expanded, up when minimized
-    var btn = tile.querySelector('.min-btn');
-    if (btn){
-      btn.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (isMin ? '<path d="M3 10l5-5 5 5"/>' : '<path d="M3 6l5 5 5-5"/>') + '</svg>';
-      btn.title = isMin ? 'Expand' : 'Collapse';
-    }
-  }
-  google.script.run.saveMyPrefs(JSON.stringify(prefs));
 }
 
 // Re-apply per-widget custom styles after a re-render.
@@ -794,13 +786,13 @@ var WIDGET_BACK = {
     });
 
     return '<div class="flip-back-card">'
-      + '<div class="flip-back-title" data-emo="📊">Lexile Score Tracker</div>'
+      + '<div class="flip-back-title" data-emo="📊">Test Score Tracker</div>'
       + '<div style="overflow-y:auto;flex:1;padding-right:2px;">'
-      +   '<div style="font-size:11px;color:var(--tx3);margin-bottom:12px;line-height:1.6;">Enter Lexile scores for each testing season. Leave blank to skip.</div>'
+      +   '<div style="font-size:11px;color:var(--tx2);margin-bottom:12px;line-height:1.6;">Enter your RIT score for each testing season. Colors compare you to the grade-level average. Leave blank to skip.</div>'
       +   rows
       +   '<div style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px;">'
-      +     '<label style="font-size:11px;font-weight:600;color:var(--tx2);display:block;margin-bottom:6px;">&#127945; Lexile Goal <span style="color:var(--tx4);font-weight:400;">(optional — dotted line on chart)</span></label>'
-      +     '<input class="finp" type="number" id="sc-goal" value="' + goal + '" placeholder="e.g. 1200" min="0" max="2000" style="width:150px;font-size:13px;">'
+      +     '<label style="font-size:11px;font-weight:600;color:var(--tx2);display:block;margin-bottom:6px;">&#127945; My Goal <span style="color:var(--tx3);font-weight:400;">(optional — dotted line on chart)</span></label>'
+      +     '<input class="finp" type="number" id="sc-goal" value="' + goal + '" placeholder="e.g. 220" min="0" max="2000" style="width:150px;font-size:13px;">'
       +   '</div></div>'
       + '<div class="flip-back-footer">'
       +   '<button class="btn btn-ghost btn-sm" onclick="unflipWidget(\'scores\')">Cancel</button>'
@@ -1004,12 +996,22 @@ function buildBackPanel(id, activeTab){
     return '<div class="flip-back-card">' + styleHTML + '</div>';
   }
 
-  // Tabbed path
+  // Tabbed path — file-folder tabs matching the ROW widget
   var isStyle = activeTab === 'style';
+  function fTab(tab, label){
+    var on = (tab === 'style') === isStyle;
+    return '<div onclick="switchBackTab(\'' + id + '\',\'' + tab + '\')" style="'
+      + 'flex:1;text-align:center;cursor:pointer;user-select:none;'
+      + 'padding:10px 10px 9px;font-size:13px;font-weight:700;letter-spacing:.2px;'
+      + 'border-radius:9px 9px 0 0;font-family:inherit;'
+      + 'background:' + (on ? 'var(--a1)' : 'rgba(255,255,255,.04)') + ';'
+      + 'color:'      + (on ? '#ffffff'  : 'var(--tx3)') + ';'
+      + 'border:1px solid ' + (on ? 'var(--a1)' : 'rgba(255,255,255,.10)') + ';border-bottom:none;'
+      + '">' + label + '</div>';
+  }
   return '<div class="flip-back-card">'
-    + '<div style="display:flex;gap:3px;padding:12px 14px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;background:rgba(0,0,0,.18);">'
-    +   '<button class="flip-tab flip-tab-edit'  + (!isStyle ? ' active' : '') + '" onclick="switchBackTab(\'' + id + '\',\'edit\')">Edit</button>'
-    +   '<button class="flip-tab flip-tab-style' + ( isStyle ? ' active' : '') + '" onclick="switchBackTab(\'' + id + '\',\'style\')">Style</button>'
+    + '<div style="display:flex;gap:5px;padding:10px 12px 0;border-bottom:3px solid var(--a1);flex-shrink:0;background:rgba(0,0,0,.18);">'
+    +   fTab('edit', 'Edit') + fTab('style', 'Style')
     + '</div>'
     + '<div style="flex:1;overflow-y:auto;padding:0;">'
     +   '<div id="ftab-edit-'  + id + '" style="' + (isStyle ? 'display:none;' : '') + 'padding:4px 0;">' + editHTML + '</div>'
@@ -1046,7 +1048,7 @@ function renderEmbedWidgetHTML(tileId){
   }
   if (!doc) return '<div class="card"><div class="empty"><div class="empty-ico">&#128196;</div><p>Document not found.</p></div></div>';
 
-  var embedUrl = getEmbedUrl(doc.url);
+  var embedUrl = getEmbedUrl(doc.url, doc.embedOptions);
   // Icons keyed by docType (set when teacher embedded the doc)
   var icons = {doc:'&#128196;', sheet:'&#128202;', slides:'&#128250;', form:'&#128203;'};
 
@@ -1076,13 +1078,26 @@ function detectDocType(url){
 //   Sheets: /edit → /htmlembed (works without "Publish to web")
 //   Slides: /edit → /embed
 //   Forms:  /edit → /viewform?embedded=true
-function getEmbedUrl(url){
+function getEmbedUrl(url, options){
   if (!url) return '';
+  options = options || {};
   try {
-    if (url.includes('/document/d/'))   return url.replace(/\/edit[^]*$/, '/preview');
-    if (url.includes('/spreadsheets/')) return url.replace(/\/edit[^]*$/, '/htmlembed?widget=true&headers=false&chrome=false');
-    if (url.includes('/presentation/')) return url.replace(/\/edit[^]*$/, '/embed?start=false&loop=false');
-    if (url.includes('/forms/d/'))      return url.replace(/\/edit[^]*$/, '/viewform?embedded=true');
+    // Strip any trailing /edit, /view, /preview, query, or fragment so we always end at the doc ID
+    var clean = url.replace(/\/(edit|view|preview|htmlembed|embed|viewform)?([?#][^]*)?$/, '');
+
+    if (url.indexOf('/document/d/') > -1) return clean + '/preview';
+
+    if (url.indexOf('/spreadsheets/') > -1) {
+      var params = [];
+      if (options.gid)         params.push('gid=' + encodeURIComponent(options.gid));
+      if (options.range)       params.push('range=' + encodeURIComponent(options.range));
+      if (options.hideHeaders) params.push('headers=false');
+      var qs = params.length ? '?' + params.join('&') : '';
+      return clean + '/preview' + qs;
+    }
+
+    if (url.indexOf('/presentation/') > -1) return clean + '/embed?start=false&loop=false';
+    if (url.indexOf('/forms/d/') > -1)      return clean + '/viewform?embedded=true';
     return url;
   } catch(e){
     return url;
@@ -1716,7 +1731,7 @@ function flipSaveTask(){
   var titleVal = title ? title.value.trim() : '';
   if (!titleVal){ toast('Enter a title', 'err'); return; }
   // Easter egg: science-mode trigger
-  if (checkScienceTrigger(titleVal)){ activateScienceMode(); }
+  if (APP_FLAGS.EGG_SCIENCE && checkScienceTrigger(titleVal)){ activateScienceMode(); }
 
   var subj   = document.getElementById('flip-task-subj');
   var pri    = document.getElementById('flip-task-pri');
@@ -1765,8 +1780,32 @@ function flipSaveTask(){
 // Easter egg trigger: if any active task is titled exactly "put emojis
 // everywhere", flip body class and re-paint widgets so icons swap to emojis.
 // Marking that task complete turns the mode off again.
+// School-wide easter egg flags, loaded once at boot. Default to ON so a
+// slow or failed fetch never silently disables them.
+var APP_FLAGS = {EGG_EMOJI: true, EGG_SCIENCE: true};
+(function loadAppFlags(){
+  try {
+    google.script.run.withSuccessHandler(function(r){
+      if (r && r.success && r.flags){
+        if (r.flags.EGG_EMOJI   !== undefined) APP_FLAGS.EGG_EMOJI   = r.flags.EGG_EMOJI;
+        if (r.flags.EGG_SCIENCE !== undefined) APP_FLAGS.EGG_SCIENCE = r.flags.EGG_SCIENCE;
+      }
+      if (!APP_FLAGS.EGG_EMOJI && _emojiMode){
+        _emojiMode = false;
+        document.body.classList.remove('emoji-mode');
+      }
+    }).getAppFlags();
+  } catch(e){}
+})();
+
 function checkEmojiEasterEgg(){
   var wasOn  = _emojiMode;
+  // School-wide kill switch
+  if (!APP_FLAGS.EGG_EMOJI){
+    _emojiMode = false;
+    if (wasOn) document.body.classList.remove('emoji-mode');
+    return;
+  }
   var active = myTasks.some(function(t){
     return t.status !== 'completed' && t.status !== 'deleted'
         && String(t.title || '').trim().toLowerCase() === 'put emojis everywhere';
@@ -1859,6 +1898,13 @@ function parseNotesData(raw){
     if (p && p._v === 2 && p.tabs) return p.tabs;
   } catch(e){}
   return {default:raw};
+}
+
+// Serialize tab-keyed notes data to a JSON string for storage.
+// Inverse of parseNotesData. Always emits the new format (_v=2 + tabs map).
+function serializeNotesData(data){
+  if (!data || typeof data !== 'object') return '';
+  return JSON.stringify({ _v: 2, tabs: data });
 }
 
 // Switch the active notes tab. Saves the current tab's textarea value
@@ -2166,61 +2212,125 @@ function setWeatherView(v){
 // Fetch weather from Open-Meteo and render based on the current view mode.
 // Today view uses current_weather; multi-day uses daily forecast with
 // max/min temps and precipitation probability.
+// Fetch from the National Weather Service. Two steps: /points resolves
+// lat/lon to a forecast grid, then the grid URL returns the forecast.
+// The grid URL is cached in prefs so step one only runs when the city changes.
 function fetchWeatherData(lat, lon, city){
   var vw = prefs.weatherView || 'today';
   var el = document.getElementById('weather-body');
   if (!el) return;
   el.innerHTML = '<div class="weather-loading"><div class="spinner" style="margin:0 auto 8px;"></div>Loading...</div>';
 
-  // Build the right URL for the current view
-  var url;
-  if (vw === 'today'){
-    url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&current_weather=true&temperature_unit=fahrenheit&windspeed_unit=mph';
-  } else {
-    var days = vw === '5day' ? 5 : 10;
-    url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&temperature_unit=fahrenheit&timezone=auto&forecast_days=' + days;
+  function renderErr(msg){
+    if (el) el.innerHTML = '<div class="weather-err">' + esc(msg || 'Could not load weather.') + '</div>';
+    hideWidgetLoader('weather');
   }
 
-  fetch(url).then(function(r){ return r.json(); }).then(function(data){
-    if (vw === 'today'){
-      var cw   = data.current_weather;
-      var code = cw.weathercode;
-      var icon = WMO_ICONS[code] || '&#127777;';
-      var desc = WMO_DESC[code]  || '';
-      el.innerHTML = '<div class="weather-display">'
-        + '<div class="weather-icon">' + icon + '</div>'
-        + '<div class="weather-temp">' + toDisplayTemp(cw.temperature) + tempLabel() + '</div>'
-        + '<div class="weather-desc">' + desc + '</div>'
-        + '<div class="weather-city">' + (city || 'Your Location') + '</div>'
-        + '<div class="weather-meta"><div class="weather-meta-item">Wind: ' + Math.round(cw.windspeed) + ' mph</div></div>'
-        + '<button class="btn btn-ghost btn-sm" style="margin-top:12px;width:100%;" onclick="loadWeather()">Refresh</button>'
-        + '</div>';
-    } else {
-      // Multi-day: build a horizontally-scrollable column per day
-      var d    = data.daily;
-      var cols = d.time.length;
-      var html = '<div style="display:grid;grid-template-columns:repeat(' + cols + ',1fr);gap:4px;overflow-x:auto;">';
-      for (var i = 0; i < cols; i++){
-        var dt     = new Date(d.time[i] + 'T12:00:00');  // T12 avoids tz landmines
-        var dn     = DAYS[dt.getDay()].substring(0, 3);
-        var ico    = WMO_ICONS[d.weathercode[i]] || '&#127777;';
-        var precip = (d.precipitation_probability_max && d.precipitation_probability_max[i] != null) ? d.precipitation_probability_max[i] : null;
-        html += '<div style="text-align:center;padding:8px 3px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;">'
-          + '<div style="font-size:9px;font-weight:600;color:var(--a2);margin-bottom:3px;letter-spacing:.3px;">' + dn + '</div>'
-          + '<div style="font-size:18px;margin:2px 0;">' + ico + '</div>'
-          + '<div style="font-size:12px;font-weight:700;color:var(--tx);">' + toDisplayTemp(d.temperature_2m_max[i]) + tempLabel() + '</div>'
-          + '<div style="font-size:10px;color:var(--tx3);">' + toDisplayTemp(d.temperature_2m_min[i]) + tempLabel() + '</div>'
-          + (precip != null ? '<div style="font-size:9px;color:#38bdf8;margin-top:2px;">&#128167;' + precip + '%</div>' : '')
-          + '</div>';
-      }
-      html += '</div><button class="btn btn-ghost btn-sm" style="margin-top:10px;width:100%;" onclick="loadWeather()">Refresh</button>';
-      el.innerHTML = html;
-    }
-  }).catch(function(){
-    if (el) el.innerHTML = '<div class="weather-err">Could not load weather.</div>';
-  }).finally(function(){
-    hideWidgetLoader('weather');
+  function loadForecast(url){
+    fetch(url)
+      .then(function(r){
+        if (!r.ok) throw new Error('Weather service returned ' + r.status);
+        return r.json();
+      })
+      .then(function(data){
+        var periods = (data && data.properties && data.properties.periods) || [];
+        if (!periods.length) return renderErr('No forecast available.');
+        if (vw === 'today') renderNwsToday(el, periods, city);
+        else                renderNwsDays(el, periods);
+        hideWidgetLoader('weather');
+      })
+      .catch(function(e){
+        // A stale cached grid URL is the usual failure — clear and retry once
+        if (prefs.weatherGridUrl){
+          prefs.weatherGridUrl = '';
+          google.script.run.saveMyPrefs(JSON.stringify(prefs));
+          resolveGrid();
+        } else {
+          renderErr(e && e.message);
+        }
+      });
+  }
+
+  function resolveGrid(){
+    fetch('https://api.weather.gov/points/' + Number(lat).toFixed(4) + ',' + Number(lon).toFixed(4))
+      .then(function(r){
+        if (!r.ok) throw new Error('Location lookup failed (' + r.status + ')');
+        return r.json();
+      })
+      .then(function(pt){
+        var url = pt && pt.properties && pt.properties.forecast;
+        if (!url) throw new Error('No forecast for that location. US locations only.');
+        prefs.weatherGridUrl = url;
+        google.script.run.saveMyPrefs(JSON.stringify(prefs));
+        loadForecast(url);
+      })
+      .catch(function(e){ renderErr(e && e.message); });
+  }
+
+  if (prefs.weatherGridUrl) loadForecast(prefs.weatherGridUrl);
+  else resolveGrid();
+}
+
+// Today view — current period plus tonight's low.
+function renderNwsToday(el, periods, city){
+  var p = periods[0];
+  var next = periods[1];
+  var pop = (p.probabilityOfPrecipitation && p.probabilityOfPrecipitation.value) || 0;
+  var icon = nwsIcon(p.shortForecast, p.isDaytime);
+
+  el.innerHTML = '<div class="weather-display">'
+    + '<div class="weather-icon">' + icon + '</div>'
+    + '<div class="weather-temp">' + toDisplayTemp(p.temperature) + tempLabel() + '</div>'
+    + '<div class="weather-desc">' + esc(p.shortForecast) + '</div>'
+    + '<div class="weather-city">' + esc(city || 'Your Location') + '</div>'
+    + '<div class="weather-meta">'
+    +   '<div class="weather-meta-item">Wind: ' + esc(p.windSpeed || '') + '</div>'
+    +   (pop ? '<div class="weather-meta-item">Rain: ' + pop + '%</div>' : '')
+    +   (next ? '<div class="weather-meta-item">' + esc(next.isDaytime ? 'High' : 'Low') + ': ' + toDisplayTemp(next.temperature) + tempLabel() + '</div>' : '')
+    + '</div>'
+    + '<button class="btn btn-ghost btn-sm" style="margin-top:12px;width:100%;" onclick="loadWeather()">Refresh</button>'
+    + '</div>';
+}
+
+// Multi-day view — pair each daytime period with the night that follows.
+function renderNwsDays(el, periods){
+  var days = [];
+  for (var i = 0; i < periods.length && days.length < 7; i++){
+    if (!periods[i].isDaytime) continue;
+    var night = periods[i + 1] && !periods[i + 1].isDaytime ? periods[i + 1] : null;
+    days.push({day: periods[i], night: night});
+  }
+  if (!days.length && periods.length) days.push({day: periods[0], night: periods[1] || null});
+
+  var html = '<div style="display:grid;grid-template-columns:repeat(' + days.length + ',1fr);gap:4px;overflow-x:auto;">';
+  days.forEach(function(d){
+    var p = d.day;
+    var label = String(p.name || '').replace(/ (Afternoon|Night)$/, '').slice(0, 3);
+    var pop = (p.probabilityOfPrecipitation && p.probabilityOfPrecipitation.value) || 0;
+    html += '<div style="text-align:center;padding:8px 3px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;">'
+      + '<div style="font-size:9px;font-weight:600;color:var(--a2);margin-bottom:3px;letter-spacing:.3px;">' + esc(label) + '</div>'
+      + '<div style="font-size:18px;margin:2px 0;">' + nwsIcon(p.shortForecast, true) + '</div>'
+      + '<div style="font-size:12px;font-weight:700;color:var(--tx);">' + toDisplayTemp(p.temperature) + tempLabel() + '</div>'
+      + '<div style="font-size:10px;color:var(--tx2);">' + (d.night ? toDisplayTemp(d.night.temperature) + tempLabel() : '\u2014') + '</div>'
+      + (pop ? '<div style="font-size:9px;color:#38bdf8;margin-top:2px;">&#128167;' + pop + '%</div>' : '')
+      + '</div>';
   });
+  html += '</div><button class="btn btn-ghost btn-sm" style="margin-top:10px;width:100%;" onclick="loadWeather()">Refresh</button>';
+  el.innerHTML = html;
+}
+
+// Map the NWS text description to an emoji.
+function nwsIcon(text, isDay){
+  var t = String(text || '').toLowerCase();
+  if (t.indexOf('thunder') > -1) return '&#9928;';
+  if (t.indexOf('snow') > -1 || t.indexOf('flurr') > -1 || t.indexOf('sleet') > -1) return '&#127784;';
+  if (t.indexOf('rain') > -1 || t.indexOf('shower') > -1 || t.indexOf('drizzle') > -1) return '&#127783;';
+  if (t.indexOf('fog') > -1 || t.indexOf('haze') > -1 || t.indexOf('smoke') > -1) return '&#127787;';
+  if (t.indexOf('wind') > -1) return '&#128168;';
+  if (t.indexOf('mostly cloudy') > -1 || t.indexOf('overcast') > -1) return '&#9729;';
+  if (t.indexOf('partly') > -1 || t.indexOf('scattered') > -1 || t.indexOf('few') > -1) return isDay ? '&#9925;' : '&#127772;';
+  if (t.indexOf('clear') > -1 || t.indexOf('sunny') > -1) return isDay ? '&#9728;' : '&#127769;';
+  return '&#127777;';
 }
 
 // Use browser geolocation + reverse-lookup (Nominatim) to set lat/lon/city.
@@ -2241,6 +2351,7 @@ function flipGeoLocate(){
       .then(function(d){
         var city = (d.address.city || d.address.town || d.address.village || '') + (d.address.state ? ', ' + d.address.state : '');
         prefs.weatherCity = city;
+              prefs.weatherGridUrl = '';
         google.script.run.saveMyPrefs(JSON.stringify(prefs));
         unflipWidget('weather');
         loadWeather();
@@ -2268,6 +2379,7 @@ function flipManualCity(){
       prefs.weatherLat  = parseFloat(data[0].lat);
       prefs.weatherLon  = parseFloat(data[0].lon);
       prefs.weatherCity = city;
+            prefs.weatherGridUrl = '';
       google.script.run.saveMyPrefs(JSON.stringify(prefs));
       unflipWidget('weather');
       loadWeather();
@@ -2289,6 +2401,7 @@ function useGeoLocation(){
     fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lon + '&format=json').then(function(r){ return r.json(); }).then(function(d){
       var city = (d.address.city || d.address.town || d.address.village || '') + (d.address.state ? ', ' + d.address.state : '');
       prefs.weatherCity = city;
+            prefs.weatherGridUrl = '';
       google.script.run.saveMyPrefs(JSON.stringify(prefs));
       closeModal('weather-modal');
       fetchWeatherData(lat, lon, city);
@@ -2309,6 +2422,7 @@ function useManualCity(){
     if (!data.length){ toast('City not found.', 'err'); return; }
     var lat = parseFloat(data[0].lat), lon = parseFloat(data[0].lon);
     prefs.weatherLat = lat; prefs.weatherLon = lon; prefs.weatherCity = city;
+          prefs.weatherGridUrl = '';
     google.script.run.saveMyPrefs(JSON.stringify(prefs));
     closeModal('weather-modal');
     fetchWeatherData(lat, lon, city);
@@ -2888,18 +3002,33 @@ function showLunchDay(dateStr){
    as a dotted reference line.
    ═══════════════════════════════════════════════════════════════════ */
 
-// Render the SVG line chart. Handles missing data points (broken lines),
-// auto-scales y-axis with padding, and renders grade-group bands across
-// the x-axis (6th / 7th / 8th).
+// Render the RIT score chart with grade-level norm bands behind it.
+// Orange = below the season norm, green = at/above, blue = well above.
 function renderScoresChart(){
   var el = document.getElementById('scores-chart');
   if (!el) return;
 
+  // 2015 NWEA Reading Student Status Norms — mean and standard deviation
+  // for begin / mid / end of year, grades 6-8.
+  var NORMS = {
+    '6-fall':211.0, '6-winter':214.2, '6-spring':215.8,
+    '7-fall':214.4, '7-winter':216.9, '7-spring':218.2,
+    '8-fall':217.2, '8-winter':219.1, '8-spring':220.1
+  };
+  var SDS = {
+    '6-fall':14.94, '6-winter':14.53, '6-spring':14.66,
+    '7-fall':15.31, '7-winter':14.98, '7-spring':15.14,
+    '8-fall':15.72, '8-winter':15.37, '8-spring':15.73
+  };
+  // Average range = mean ± this many standard deviations (~7.5 points).
+  var SD_BAND   = 0.5;
+  var C_BLUE    = '#38bdf8';
+  var C_GREEN   = '#22c55e';
+  var C_ORANGE  = '#f59e0b';
   var data    = prefs.testingScores || {goal:null, entries:{}};
   var entries = data.entries || {};
   var goal    = data.goal ? Number(data.goal) : null;
 
-  // Canonical 9-season key order (must match the editor's grid)
   var KEYS     = ['6-fall','6-winter','6-spring','7-fall','7-winter','7-spring','8-fall','8-winter','8-spring'];
   var S_LABELS = ['Fall','Win','Spr','Fall','Win','Spr','Fall','Win','Spr'];
   var G_LABELS = ['6th Grade','7th Grade','8th Grade'];
@@ -2907,114 +3036,118 @@ function renderScoresChart(){
   var vals    = KEYS.map(function(k){ return entries[k] ? Number(entries[k]) : null; });
   var nonNull = vals.filter(function(v){ return v !== null; });
 
-  // No data + no goal → empty state
+  // Band edges for a season: half an SD either side of the mean.
+  function lowEdge(key){  return NORMS[key] - SDS[key] * SD_BAND; }
+  function highEdge(key){ return NORMS[key] + SDS[key] * SD_BAND; }
+
+  function bandColor(v, key){
+    if (!NORMS[key]) return C_GREEN;
+    if (v <  lowEdge(key))  return C_ORANGE;
+    if (v >= highEdge(key)) return C_BLUE;
+    return C_GREEN;
+  }
+
   if (!nonNull.length && !goal){
     el.innerHTML = '<div class="empty" style="padding:20px 0;"><div class="empty-ico">&#128200;</div><p style="font-size:12px;">Click &#9881; Edit to enter scores.</p></div>';
     return;
   }
 
-  // Y-axis range: pad max & min so points don't sit on the edges
-  var allVals = goal ? nonNull.concat([goal]) : nonNull;
-  var rawMax  = allVals.length ? Math.max.apply(null, allVals) : 1200;
-  var rawMin  = allVals.length ? Math.min.apply(null, allVals) : 400;
-  var pad     = Math.max(120, Math.ceil((rawMax - rawMin) * 0.25));
-  var maxV    = Math.ceil((rawMax + pad) / 50) * 50;
-  var minV    = Math.max(0, Math.floor((rawMin - pad) / 50) * 50);
+  // Scale so the bands are always visible, not just the plotted points
+  var allVals = nonNull
+    .concat(KEYS.map(lowEdge))
+    .concat(KEYS.map(highEdge));
+  if (goal) allVals.push(goal);
+  var rawMax = Math.max.apply(null, allVals);
+  var rawMin = Math.min.apply(null, allVals);
+  var pad    = Math.max(6, Math.ceil((rawMax - rawMin) * 0.18));
+  var maxV   = Math.ceil((rawMax + pad) / 5) * 5;
+  var minV   = Math.max(0, Math.floor((rawMin - pad) / 5) * 5);
 
-  // SVG layout — viewBox + padding for axes/labels
   var W = 440, H = 210;
-  var PL = 58, PR = 18, PT = 22, PB = 50;
-  var cW = W - PL - PR;
-  var cH = H - PT - PB;
-  function toX(i){ return PL + i * (cW / 8); }       // 9 points → 8 intervals
+  var PL = 46, PR = 18, PT = 22, PB = 50;
+  var cW = W - PL - PR, cH = H - PT - PB;
+  function toX(i){ return PL + i * (cW / 8); }
   function toY(v){ return PT + cH * (1 - (v - minV) / (maxV - minV)); }
+  function clampY(v){ return Math.max(PT, Math.min(PT + cH, toY(v))); }
 
   var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;overflow:visible;">';
 
-  // ── Y gridlines + tick labels (5 ticks) ──
+  // ── Norm bands ──
+  var lowPts  = KEYS.map(function(k, i){ return toX(i) + ' ' + clampY(lowEdge(k)); });
+  var highPts = KEYS.map(function(k, i){ return toX(i) + ' ' + clampY(highEdge(k)); });
+  var meanPts = KEYS.map(function(k, i){ return toX(i) + ' ' + clampY(NORMS[k]); });
+  svg += '<path d="M ' + lowPts.join(' L ') + ' L ' + toX(8) + ' ' + (PT + cH) + ' L ' + toX(0) + ' ' + (PT + cH) + ' Z" fill="' + C_ORANGE + '" opacity=".16"/>';
+  svg += '<path d="M ' + lowPts.join(' L ') + ' L ' + highPts.slice().reverse().join(' L ') + ' Z" fill="' + C_GREEN + '" opacity=".16"/>';
+  svg += '<path d="M ' + highPts.join(' L ') + ' L ' + toX(8) + ' ' + PT + ' L ' + toX(0) + ' ' + PT + ' Z" fill="' + C_BLUE + '" opacity=".16"/>';
+  svg += '<path d="M ' + meanPts.join(' L ') + '" fill="none" stroke="' + C_GREEN + '" stroke-width="1.2" opacity=".55" stroke-dasharray="4,3"/>';
+
+  // ── Y gridlines ──
   for (var t = 0; t <= 4; t++){
     var tv = Math.round(minV + (maxV - minV) * t / 4);
     var ty = toY(tv);
     svg += '<line x1="' + PL + '" y1="' + ty + '" x2="' + (W - PR) + '" y2="' + ty + '" stroke="rgba(255,255,255,.05)" stroke-width="1"/>';
-    svg += '<text x="' + (PL - 5) + '" y="' + (ty + 4) + '" fill="rgba(148,163,184,.55)" font-size="9" text-anchor="end" font-family="DM Sans,sans-serif">' + tv + '</text>';
+    svg += '<text x="' + (PL - 5) + '" y="' + (ty + 4) + '" fill="rgba(148,163,184,.75)" font-size="9" text-anchor="end" font-family="DM Sans,sans-serif">' + tv + '</text>';
   }
 
-  // ── Grade group bands (6th/7th/8th — 3 seasons each) + separators ──
+  // ── Grade group labels + separators ──
   [[0,2],[3,5],[6,8]].forEach(function(b, gi){
-    var x1 = toX(b[0]) - (cW / 8) * 0.38;
-    var x2 = toX(b[1]) + (cW / 8) * 0.38;
-    svg += '<rect x="' + x1 + '" y="' + PT + '" width="' + (x2 - x1) + '" height="' + cH + '" rx="4" fill="rgba(255,255,255,.02)"/>';
-    svg += '<text x="' + ((toX(b[0]) + toX(b[1])) / 2) + '" y="' + (H - 7) + '" fill="var(--a2)" font-size="10" font-weight="600" text-anchor="middle" font-family="inherit" letter-spacing=".5">' + G_LABELS[gi] + '</text>';
-    // Dashed separator between groups (after 6th and 7th)
+    svg += '<text x="' + ((toX(b[0]) + toX(b[1])) / 2) + '" y="' + (H - 7) + '" fill="var(--a2)" font-size="10" font-weight="600" text-anchor="middle" font-family="inherit">' + G_LABELS[gi] + '</text>';
     if (gi < 2){
       var sx = toX(b[1]) + (cW / 8) * 0.5;
-      svg += '<line x1="' + sx + '" y1="' + PT + '" x2="' + sx + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.07)" stroke-width="1" stroke-dasharray="3,3"/>';
+      svg += '<line x1="' + sx + '" y1="' + PT + '" x2="' + sx + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.14)" stroke-width="1" stroke-dasharray="3,3"/>';
     }
   });
 
-  // ── Goal dotted reference line + label ──
+  // ── Goal line ──
   if (goal){
-    var clampedG = Math.max(minV, Math.min(maxV, goal));
-    var gy = toY(clampedG);
-    svg += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="var(--a2)" stroke-width="1.5" stroke-dasharray="5,4" opacity=".9"/>';
-    svg += '<rect x="' + (W - PR - 36) + '" y="' + (gy - 11) + '" width="36" height="13" rx="3" fill="rgba(14,22,44,.85)"/>';
-    svg += '<text x="' + (W - PR - 4) + '" y="' + (gy - 2) + '" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="end" font-family="inherit">' + goal + ' L</text>';
+    var gy = clampY(goal);
+    svg += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="5,4" opacity=".8"/>';
+    svg += '<text x="' + (W - PR - 3) + '" y="' + (gy - 3) + '" fill="#e2e8f0" font-size="9" font-weight="600" text-anchor="end" font-family="inherit">Goal ' + goal + '</text>';
   }
 
-  // ── Build line segments — break at nulls so gaps don't draw thru ──
+  // ── Connecting line, broken at gaps ──
   var segments = [], cur = [];
   for (var i = 0; i < 9; i++){
-    if (vals[i] !== null){
-      cur.push({x:toX(i), y:toY(vals[i]), v:vals[i]});
-    } else {
-      if (cur.length) segments.push(cur);
-      cur = [];
-    }
+    if (vals[i] !== null) cur.push({x:toX(i), y:toY(vals[i])});
+    else { if (cur.length) segments.push(cur); cur = []; }
   }
   if (cur.length) segments.push(cur);
-
-  // ── Area fill under each segment (gradient from accent color) ──
-  segments.forEach(function(seg, si){
-    if (seg.length < 1) return;
-    var gradId = 'areag' + si;
-    svg += '<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--a1)" stop-opacity=".3"/><stop offset="100%" stop-color="var(--a1)" stop-opacity=".01"/></linearGradient></defs>';
-    var aPath = 'M ' + seg[0].x + ' ' + (PT + cH);
-    seg.forEach(function(p){ aPath += ' L ' + p.x + ' ' + p.y; });
-    aPath += ' L ' + seg[seg.length - 1].x + ' ' + (PT + cH) + ' Z';
-    svg += '<path d="' + aPath + '" fill="url(#' + gradId + ')" />';
-  });
-
-  // ── Lines (drawn twice — once thick, once thin lighter for sheen) ──
   segments.forEach(function(seg){
     if (seg.length < 2) return;
     var d = 'M ' + seg[0].x + ' ' + seg[0].y;
     seg.forEach(function(p, pi){ if (pi > 0) d += ' L ' + p.x + ' ' + p.y; });
-    svg += '<path d="' + d + '" fill="none" stroke="var(--a1)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
-    svg += '<path d="' + d + '" fill="none" stroke="var(--a2)" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" opacity=".45"/>';
+    svg += '<path d="' + d + '" fill="none" stroke="#0f172a" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round" opacity=".55"/>';
+    svg += '<path d="' + d + '" fill="none" stroke="#e2e8f0" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>';
   });
 
-  // ── Dots, value labels, x-axis season labels (filled OR placeholder) ──
+  // ── Dots + value pills, colored by band ──
   for (var i = 0; i < 9; i++){
     var x = toX(i);
     if (vals[i] !== null){
       var y = toY(vals[i]);
-      svg += '<circle cx="' + x + '" cy="' + y + '" r="5" fill="var(--a1)" stroke="#0f172a" stroke-width="2.5"/>';
-      svg += '<circle cx="' + x + '" cy="' + y + '" r="2.5" fill="var(--a2)"/>';
-      // Drop the value label below the point if it would overflow the top
-      var lblY = (y < PT + 16) ? y + 16 : y - 8;
-      svg += '<text x="' + x + '" y="' + lblY + '" fill="var(--a2)" font-size="9" font-weight="600" text-anchor="middle" font-family="inherit">' + vals[i] + '</text>';
+      var c = bandColor(vals[i], KEYS[i]);
+      svg += '<circle cx="' + x + '" cy="' + y + '" r="5.5" fill="' + c + '" stroke="#0f172a" stroke-width="2.5"/>';
+      var lblY = (y < PT + 20) ? y + 19 : y - 11;
+      svg += '<rect x="' + (x - 15) + '" y="' + (lblY - 9) + '" width="30" height="13" rx="6.5" fill="#0f172a" stroke="' + c + '" stroke-width="1.2"/>';
+      svg += '<text x="' + x + '" y="' + (lblY + 1) + '" fill="' + c + '" font-size="9" font-weight="700" text-anchor="middle" font-family="inherit">' + vals[i] + '</text>';
     } else {
-      // Placeholder dashed circle for missing seasons
-      svg += '<circle cx="' + x + '" cy="' + (PT + cH / 2) + '" r="3.5" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="1.5" stroke-dasharray="2,2"/>';
+      svg += '<circle cx="' + x + '" cy="' + (PT + cH / 2) + '" r="3.5" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="1.5" stroke-dasharray="2,2"/>';
     }
-    svg += '<text x="' + x + '" y="' + (PT + cH + 15) + '" fill="rgba(148,163,184,.6)" font-size="9" text-anchor="middle" font-family="inherit">' + S_LABELS[i] + '</text>';
+    svg += '<text x="' + x + '" y="' + (PT + cH + 15) + '" fill="rgba(148,163,184,.8)" font-size="9" text-anchor="middle" font-family="inherit">' + S_LABELS[i] + '</text>';
   }
 
-  // ── Axes + Y-axis "LEXILE" rotated label ──
-  svg += '<line x1="' + PL + '" y1="' + PT + '" x2="' + PL + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
-  svg += '<line x1="' + PL + '" y1="' + (PT + cH) + '" x2="' + (W - PR) + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.12)" stroke-width="1"/>';
-  svg += '<text x="14" y="' + (PT + cH / 2) + '" fill="rgba(148,163,184,.55)" font-size="9" font-weight="600" letter-spacing="1" text-anchor="middle" font-family="inherit" transform="rotate(-90,14,' + (PT + cH / 2) + ')">LEXILE</text>';
+  // ── Axes ──
+  svg += '<line x1="' + PL + '" y1="' + PT + '" x2="' + PL + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.16)" stroke-width="1"/>';
+  svg += '<line x1="' + PL + '" y1="' + (PT + cH) + '" x2="' + (W - PR) + '" y2="' + (PT + cH) + '" stroke="rgba(255,255,255,.16)" stroke-width="1"/>';
   svg += '</svg>';
+
+  // ── Legend ──
+  svg += '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:6px;font-size:10px;color:var(--tx2);">'
+    + '<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + C_BLUE   + ';margin-right:4px;vertical-align:-1px;"></span>Above average</span>'
+    + '<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + C_GREEN  + ';margin-right:4px;vertical-align:-1px;"></span>Average range</span>'
+    + '<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + C_ORANGE + ';margin-right:4px;vertical-align:-1px;"></span>Below average</span>'
+    + '</div>';
+
   el.innerHTML = svg;
 }
 
@@ -3294,7 +3427,8 @@ function loadHomeData(){
       mySchedule      = r.schedule      || [];
       myNotes         = r.notes         || '';
       myLinks         = r.links         || [];
-      myEmbeddedDocs  = r.embeddedDocs  || [];
+      myEmbeddedDocs = r.embeddedDocs || [];
+      if (typeof processForcedDocs === 'function') processForcedDocs();
       bellSchedules   = r.bellSchedules || [];
       activeBell      = r.activeBell    || null;
       myNotesData     = parseNotesData(myNotes);

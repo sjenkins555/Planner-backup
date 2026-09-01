@@ -44,6 +44,15 @@ var _twLinkTab     = 'add';     // Assign Links: 'add' | 'list'
 var _twEdTarget    = 'all';     // Embed Docs: 'all' | 'group' | 'individual' | 'self'
 var _twEdTab       = 'add';     // Embed Docs: 'add' | 'list'
 var _twRemTarget   = 'all';     // Send Reminder: 'all' | 'group' | 'individual'
+var _tRowTab       = 'pending'; // ROW widget: 'pending' | 'award'
+var _rowAwardSel   = '';        // email of the student selected to receive a ROW
+var _rowAwardCat   = 'Respect'; // Respect | Ownership | Teamwork
+var _tGrpTab       = 'list';    // Groups widget: 'list' | 'edit'
+var _grpEditName   = '';        // group being edited ('' = creating new)
+var _tPickTab      = 'draw';    // ROW Picker: 'draw' | 'drawn'
+var _tPickGrade    = 'all';     // 'all' | '6' | '7' | '8'
+var _tPickPool     = null;      // cached eligible students
+var _tPickResult   = null;      // last student drawn
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -54,26 +63,43 @@ var _twRemTarget   = 'all';     // Send Reminder: 'all' | 'group' | 'individual'
 
 // Build the Teacher Tools tab. Defers widget renders by 50ms so the
 // grid paints before any async loads kick in.
+// Lazily resolve a renderer by name at call time instead of at object-literal
+// build time. A missing renderer now degrades to one broken tile instead of
+// taking down the entire dashboard.
+function _twRenderer(name, tileId){
+  return function(){
+    var f = window[name];
+    if (typeof f === 'function') return f();
+    console.warn('[teacher] missing renderer: ' + name);
+    var el = document.getElementById('tw-' + tileId);
+    if (el) el.innerHTML = '<div style="color:#f87171;font-size:12px;padding:10px;line-height:1.5;">'
+      + 'Widget unavailable.<br><span style="color:var(--tx3);font-size:11px;">' + name + '() is not loaded.</span></div>';
+  };
+}
+
 function buildTeacherDashboard(){
   // Tile definitions — one per teacher widget
   var tileDefs = {
-    tview:  {fn:renderTViewWidget,     title:'View Student',    svg:'#w-student',    defC:2, defR:2},
-    tgrp:   {fn:renderTGroupsWidget,   title:'Groups',          svg:'#w-group',      defC:2, defR:2},
-    tpush:  {fn:renderTPushWidget,     title:'Push Tasks',      svg:'#w-push',       defC:2, defR:2},
-    talink: {fn:renderTLinkWidget,     title:'Assign Links',    svg:'#w-assignlink', defC:2, defR:2},
-    tembed: {fn:renderTEmbedWidget,    title:'Embed Documents', svg:'#w-embed',      defC:4, defR:2},
-    trem:         {fn:renderTReminderWidget,     title:'Send Reminder',   svg:'#w-timer',   defC:2, defR:2},
-    rowapprovals: {fn:renderTRowApprovalsWidget, title:'ROW Approvals',   svg:'#w-rowoars', defC:2, defR:2}
+    tview:        {fn:_twRenderer('renderTViewWidget','tview'),                title:'View Student',    svg:'#w-student',    defC:2, defR:2},
+    tgrp:         {fn:_twRenderer('renderTGroupsWidget','tgrp'),               title:'Groups',          svg:'#w-group',      defC:2, defR:2},
+    tpush:        {fn:_twRenderer('renderTPushWidget','tpush'),                title:'Push Tasks',      svg:'#w-push',       defC:2, defR:2},
+    talink:       {fn:_twRenderer('renderTLinkWidget','talink'),               title:'Assign Links',    svg:'#w-assignlink', defC:2, defR:2},
+    trem:         {fn:_twRenderer('renderTReminderWidget','trem'),             title:'Send Reminder',   svg:'#w-timer',      defC:2, defR:2},
+    rowapprovals: {fn:_twRenderer('renderTRowApprovalsWidget','rowapprovals'), title:'ROW Approvals',   svg:'#w-rowoars',    defC:2, defR:2},
+    tpick:        {fn:_twRenderer('renderTPickWidget','tpick'),                title:'ROW Picker',      svg:'#w-student',    defC:2, defR:2}
   };
 
   // Reconcile saved order with the canonical default — drop unknown IDs,
   // append any new IDs that weren't saved before.
-  var defaultOrder = ['tview','tgrp','tpush','talink','tembed','trem','rowapprovals'];
+  var defaultOrder = ['tview','tgrp','tpush','talink','trem','rowapprovals','tpick'];
   if (!prefs.teacherTileOrder || !prefs.teacherTileOrder.length){
     prefs.teacherTileOrder = defaultOrder.slice();
   } else {
     var saved = prefs.teacherTileOrder.filter(function(id){ return tileDefs[id]; });
-    defaultOrder.forEach(function(id){ if (saved.indexOf(id) === -1) saved.push(id); });
+    var removed = prefs.teacherTileRemoved || [];
+    defaultOrder.forEach(function(id){
+      if (saved.indexOf(id) === -1 && removed.indexOf(id) === -1) saved.push(id);
+    });
     prefs.teacherTileOrder = saved;
   }
   if (!prefs.teacherTileSizes) prefs.teacherTileSizes = {};
@@ -153,12 +179,11 @@ function buildTeacherDashboard(){
       var minH = (rowSpan * 180) + ((rowSpan - 1) * 14);
       var pos = positions[id] || {col:1, row:1};
 
-      return '<div class="tile" id="tile-' + id + '" draggable="true" data-tile="' + id + '" '
+      return '<div class="tile" id="tile-' + id + '" data-tile="' + id + '" '
         + 'style="grid-column:' + pos.col + ' / span ' + colSpan + ';grid-row:' + pos.row + ' / span ' + rowSpan + ';min-height:' + minH + 'px;">'
         + '<div class="card" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">'
         +   '<div class="card-top">'
         +     '<div class="card-lbl"><svg class="ui-ic-sm" viewBox="0 0 24 24"><use href="' + t.svg + '"/></svg> ' + t.title + '</div>'
-        +     '<div class="tile-gear" onclick="openTSzPicker(\'' + id + '\',event)" title="Resize"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4M3 3v4M13 13h-4M13 13v-4M3 13h4M3 13v-4M13 3h-4M13 3v4"/></svg></div>'
         +   '</div>'
         +   '<div class="t-widget-body t-widget-scroll" id="tw-' + id + '"><div style="color:var(--tx3);font-size:12px;padding:20px;text-align:center;">Loading...</div></div>'
         + '</div></div>';
@@ -177,8 +202,7 @@ function buildTeacherDashboard(){
           console.error(e);
         }
       });
-      initDragDrop();
-    }, 50);
+      }, 50);
   });
 }
 
@@ -198,7 +222,7 @@ function openTSzPicker(id, evt){
   if (old){ old.remove(); if (old.dataset.wid === id) return; }
 
   // Default sizes (must match buildTeacherDashboard's tileDefs)
-  var defs = {tview:{c:2,r:2}, tgrp:{c:2,r:2}, tpush:{c:2,r:2}, talink:{c:2,r:2}, tembed:{c:4,r:2}, trem:{c:2,r:2}};
+  var defs = {tview:{c:2,r:2}, tgrp:{c:2,r:2}, tpush:{c:2,r:2}, talink:{c:2,r:2}, tembed:{c:4,r:2}, trem:{c:2,r:2}, rowapprovals:{c:2,r:2}, tpick:{c:2,r:2}};
   var cur  = Object.assign({}, defs[id] || {c:2,r:2}, (prefs.teacherTileSizes && prefs.teacherTileSizes[id]) || {});
 
   // Build popup
@@ -292,27 +316,362 @@ function renderTViewWidget(){
   loadTViewInline();
 }
 
-// Groups widget — counts header + list of groups with edit/delete buttons.
+// Groups widget — two tabs: Groups (list) and New/Edit Group (inline editor
+// with a searchable student picker). Replaces the old modal flow.
 function renderTGroupsWidget(){
   var el = document.getElementById('tw-tgrp');
   if (!el) return;
 
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+
+  var tabBar = uiTabBar([
+    {id:'list', label:'Groups', badge: groups.length || ''},
+    {id:'edit', label: _grpEditName ? 'Edit Group' : 'New Group'}
+  ], _tGrpTab, 'tGrpTab');
+
+  if (_tGrpTab === 'edit'){
+    el.innerHTML = tabBar + '<div id="grp-edit-wrap" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"></div>';
+    renderGrpEditor();
+    return;
+  }
+
   var studentCount = students.length;
   var groupRows = groups.map(function(g){
-    return '<div style="background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:8px;padding:7px 10px;margin-bottom:5px;display:flex;align-items:center;gap:8px;">'
-      + '<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(g.name) + '</div>'
-      + '<div style="font-size:10px;color:var(--tx4);">' + g.emails.length + ' student' + (g.emails.length !== 1 ? 's' : '') + '</div></div>'
-      + '<button class="btn btn-ghost btn-sm" onclick="openGrpModal(\'' + esc(g.name) + '\')" title="Edit"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-edit"/></svg></button>'
-      + '<button class="btn btn-danger btn-sm" onclick="doDelGroup(\'' + esc(g.name) + '\');setTimeout(renderTGroupsWidget,200);"><svg class="ui-ic-sm" viewBox="0 0 16 16"><use href="#w-x"/></svg></button>'
-      + '</div>';
-  }).join('') || '<div style="color:var(--tx4);font-size:12px;padding:12px;text-align:center;">No groups yet.</div>';
+    return '<div style="background:rgba(15,23,42,.6);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:5px;">'
+      + '<div style="font-size:12px;font-weight:600;margin-bottom:2px;">' + esc(g.name) + '</div>'
+      + '<div style="font-size:10px;color:var(--tx4);margin-bottom:7px;">' + g.emails.length + ' student' + (g.emails.length !== 1 ? 's' : '') + '</div>'
+      + '<div style="display:flex;gap:6px;">'
+      +   '<button onclick="tGrpEdit(\'' + esc(g.name) + '\')" style="flex:1;padding:5px 8px;background:#475569;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>'
+      +   '<button onclick="doDelGroup(\'' + esc(g.name) + '\')" style="flex:1;padding:5px 8px;background:#dc2626;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Delete</button>'
+      + '</div></div>';
+  }).join('') || '<div style="color:var(--tx4);font-size:12px;padding:14px;text-align:center;">No groups yet. Use the New Group tab.</div>';
 
-  el.innerHTML = '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">'
-    +   '<div style="flex:1;font-size:11px;color:var(--tx3);"><strong style="color:var(--tx);">' + studentCount + '</strong> student' + (studentCount !== 1 ? 's' : '') + ' &middot; <strong style="color:var(--tx);">' + groups.length + '</strong> group' + (groups.length !== 1 ? 's' : '') + '</div>'
-    +   '<button class="btn btn-primary btn-sm" onclick="openGrpModal();setTimeout(renderTGroupsWidget,200);">New Group</button>'
+  el.innerHTML = tabBar
+    + '<div style="font-size:11px;color:var(--tx3);margin-bottom:8px;flex-shrink:0;"><strong style="color:var(--tx);">' + studentCount + '</strong> student' + (studentCount !== 1 ? 's' : '') + ' &middot; <strong style="color:var(--tx);">' + groups.length + '</strong> group' + (groups.length !== 1 ? 's' : '') + '</div>'
+    + '<div style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;">' + groupRows + '</div>';
+}
+// ── ROW PICKER ──────────────────────────────────────────────────
+// Randomly draws from students you've personally given a ROW to —
+// either by approving their request or awarding one directly.
+
+// Grade from the graduation year in the email (jdoe32@ = class of 2032),
+// with the school year flipping in August.
+function _pickGradeOf(email){
+  var m = String(email || '').split('@')[0].match(/(\d{2})$/);
+  if (!m) return null;
+  var gradYear = 2000 + parseInt(m[1], 10);
+  var now = new Date();
+  var yearEnd = now.getMonth() >= 7 ? now.getFullYear() + 1 : now.getFullYear();
+  var grade = 12 - (gradYear - yearEnd);
+  return (grade >= 1 && grade <= 12) ? grade : null;
+}
+
+function renderTPickWidget(){
+  var el = document.getElementById('tw-tpick');
+  if (!el) return;
+  el.style.display = 'flex';
+  el.style.flexDirection = 'column';
+  el.style.minHeight = '0';
+
+  var tabBar = uiTabBar([
+    {id:'draw',  label:'Draw'},
+    {id:'drawn', label:'Drawn'}
+  ], _tPickTab, 'tPickTab');
+
+  if (_tPickTab === 'drawn'){
+    el.innerHTML = tabBar + '<div id="tpick-drawn" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"></div>';
+    renderTPickDrawn();
+    return;
+  }
+
+  function gBtn(v, lbl){
+    var on = _tPickGrade === v;
+    return '<div onclick="tPickGrade(\'' + v + '\')" style="flex:1;text-align:center;padding:6px 4px;border-radius:7px;cursor:pointer;font-size:11px;font-weight:600;border:1px solid ' + (on ? 'var(--a1)' : 'var(--border)') + ';background:' + (on ? 'var(--a3)' : 'transparent') + ';color:' + (on ? 'var(--a2)' : 'var(--tx3)') + ';">' + lbl + '</div>';
+  }
+
+  el.innerHTML = tabBar
+    + '<div style="display:flex;gap:5px;margin-bottom:10px;flex-shrink:0;">'
+    +   gBtn('all','All') + gBtn('6','6th') + gBtn('7','7th') + gBtn('8','8th')
     + '</div>'
-    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Groups</div>'
-    + groupRows;
+    + '<div id="tpick-result" style="flex:1;min-height:0;overflow-y:auto;display:flex;align-items:center;justify-content:center;text-align:center;"></div>'
+    + '<div id="tpick-count" style="font-size:10px;color:var(--tx4);text-align:center;margin-bottom:6px;flex-shrink:0;"></div>'
+    + '<button id="tpick-btn" onclick="tPickDraw()" style="width:100%;padding:9px 10px;background:#4f46e5;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;flex-shrink:0;">Pick a Student</button>';
+
+  renderTPickResult();
+  tPickLoadPool();
+}
+
+function tPickTab(t){ _tPickTab = t; renderTPickWidget(); }
+function tPickGrade(g){ _tPickGrade = g; _tPickResult = null; renderTPickWidget(); }
+
+// Pull every ROW transaction, keep the ones tied to this teacher.
+function tPickLoadPool(force){
+  if (_tPickPool && !force){ tPickRenderCount(); return; }
+  var cnt = document.getElementById('tpick-count');
+  if (cnt) cnt.textContent = 'Loading eligible students...';
+
+  google.script.run.withSuccessHandler(function(r){
+    var seen = {};
+    ((r && r.transactions) || []).forEach(function(t){
+      if (t.teacherEmail !== CU.email) return;
+      var counts = (t.type === 'award') || (t.type === 'request' && t.status === 'approved');
+      if (!counts) return;
+      if (!seen[t.studentEmail]) seen[t.studentEmail] = t.studentName || t.studentEmail;
+    });
+    _tPickPool = Object.keys(seen).map(function(e){
+      return {email:e, name:seen[e], grade:_pickGradeOf(e)};
+    });
+    tPickRenderCount();
+  }).withFailureHandler(function(){
+    var c = document.getElementById('tpick-count');
+    if (c) c.textContent = 'Could not load students.';
+  }).adminGetAllRowTransactions(0);
+}
+
+// Eligible = in the pool, matching grade, not already drawn.
+function tPickEligible(){
+  var drawn = (prefs.rowPickHistory || []).map(function(d){ return d.email; });
+  return (_tPickPool || []).filter(function(s){
+    if (drawn.indexOf(s.email) > -1) return false;
+    if (_tPickGrade === 'all') return true;
+    return String(s.grade) === _tPickGrade;
+  });
+}
+
+function tPickRenderCount(){
+  var el = document.getElementById('tpick-count');
+  if (!el) return;
+  if (!_tPickPool){ el.textContent = ''; return; }
+  var n = tPickEligible().length;
+  var drawn = (prefs.rowPickHistory || []).length;
+  el.textContent = n + ' eligible' + (drawn ? ' \u00b7 ' + drawn + ' already drawn' : '');
+}
+
+function renderTPickResult(){
+  var el = document.getElementById('tpick-result');
+  if (!el) return;
+  if (!_tPickResult){
+    el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:16px;">Students you\'ve given a ROW to are eligible.</div>';
+    return;
+  }
+  var g = _tPickResult.grade ? _tPickResult.grade + 'th grade' : '';
+  el.innerHTML = '<div>'
+    + '<div style="font-size:11px;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Selected</div>'
+    + '<div style="font-size:21px;font-weight:800;color:var(--a2);line-height:1.2;margin-bottom:4px;">' + esc(_tPickResult.name) + '</div>'
+    + '<div style="font-size:11px;color:var(--tx3);">' + esc(String(_tPickResult.email).split('@')[0]) + (g ? ' \u00b7 ' + g : '') + '</div>'
+    + '</div>';
+}
+
+function tPickDraw(){
+  if (!_tPickPool){ toast('Still loading — try again in a second', 'inf'); return; }
+  var pool = tPickEligible();
+  if (!pool.length){
+    toast(_tPickGrade === 'all' ? 'Everyone eligible has been drawn' : 'No eligible students left in that grade', 'err');
+    return;
+  }
+  var pick = pool[Math.floor(Math.random() * pool.length)];
+  _tPickResult = pick;
+
+  if (!prefs.rowPickHistory) prefs.rowPickHistory = [];
+  prefs.rowPickHistory.unshift({email:pick.email, name:pick.name, grade:pick.grade, at:new Date().toISOString()});
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+
+  renderTPickResult();
+  tPickRenderCount();
+}
+
+// Drawn list, split into grade sections. Anyone whose email doesn't
+// encode a readable grad year lands in "Other".
+function renderTPickDrawn(){
+  var el = document.getElementById('tpick-drawn');
+  if (!el) return;
+  var hist = prefs.rowPickHistory || [];
+  if (!hist.length){
+    el.innerHTML = '<div style="color:var(--tx4);font-size:12px;padding:16px;text-align:center;">Nobody drawn yet.</div>';
+    return;
+  }
+
+  // Keep original indexes so the X button still removes the right entry
+  var buckets = {'6':[], '7':[], '8':[], 'other':[]};
+  hist.forEach(function(d, i){
+    var key = (d.grade === 6 || d.grade === 7 || d.grade === 8) ? String(d.grade) : 'other';
+    buckets[key].push({d:d, i:i});
+  });
+
+  function row(item){
+    var d = item.d;
+    var when = '';
+    try { when = (typeof fmtDate === 'function') ? fmtDate(d.at.slice(0,10)) : ''; } catch(e){}
+    return '<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:7px;padding:6px 9px;margin-bottom:4px;">'
+      + '<div style="flex:1;min-width:0;">'
+      +   '<div style="font-size:12px;font-weight:600;color:var(--tx);">' + esc(d.name) + '</div>'
+      +   '<div style="font-size:10px;color:var(--tx2);">' + esc(String(d.email).split('@')[0]) + (when ? ' \u00b7 ' + when : '') + '</div>'
+      + '</div>'
+      + '<button onclick="tPickRemove(' + item.i + ')" title="Put back in the pool" style="padding:3px 9px;background:#dc2626;color:#fff;border:none;border-radius:5px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">\u2715</button>'
+      + '</div>';
+  }
+
+  function section(key, label){
+    var items = buckets[key];
+    if (!items.length) return '';
+    return '<div style="font-size:10px;font-weight:700;color:var(--a2);letter-spacing:.5px;text-transform:uppercase;margin:10px 2px 5px;padding-bottom:3px;border-bottom:1px solid var(--border);">'
+      + label + ' <span style="color:var(--tx3);font-weight:600;">(' + items.length + ')</span></div>'
+      + items.map(row).join('');
+  }
+
+  el.innerHTML =
+      '<div style="font-size:11px;color:var(--tx3);margin-bottom:2px;"><strong style="color:var(--tx2);">' + hist.length + '</strong> drawn total</div>'
+    + section('6', '6th Grade')
+    + section('7', '7th Grade')
+    + section('8', '8th Grade')
+    + section('other', 'Other')
+    + '<button onclick="tPickReset()" style="width:100%;margin-top:10px;padding:7px 10px;background:transparent;color:#f87171;border:1px solid rgba(239,68,68,.4);border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Reset list</button>';
+}
+
+function tPickRemove(i){
+  if (!prefs.rowPickHistory) return;
+  prefs.rowPickHistory.splice(i, 1);
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  renderTPickWidget();
+}
+
+function tPickReset(){
+  if (!confirm('Clear the drawn list? Everyone becomes eligible again.')) return;
+  prefs.rowPickHistory = [];
+  google.script.run.saveMyPrefs(JSON.stringify(prefs));
+  toast('List cleared', 'inf');
+  renderTPickWidget();
+}
+
+// Switch tabs. Leaving the editor clears any in-progress edit.
+function tGrpTab(t){
+  if (t === 'list') _grpEditName = '';
+  _tGrpTab = t;
+  renderTGroupsWidget();
+}
+
+// Open an existing group in the editor tab.
+function tGrpEdit(name){
+  _grpEditName = name;
+  _tGrpTab = 'edit';
+  renderTGroupsWidget();
+}
+
+// Build the editor shell. The student rows are filtered by hiding, not
+// re-rendering, so checkmarks survive typing in the search box.
+function renderGrpEditor(){
+  var wrap = document.getElementById('grp-edit-wrap');
+  if (!wrap) return;
+
+  var ex = null;
+  for (var i = 0; i < groups.length; i++){ if (groups[i].name === _grpEditName){ ex = groups[i]; break; } }
+  var emails = (ex && ex.emails) || [];
+
+  var rows = students.map(function(s){
+    return '<label data-name="' + esc(String(s.name || '').toLowerCase()) + '" data-email="' + esc(String(s.email || '').toLowerCase()) + '" '
+      + 'style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;cursor:pointer;background:var(--bg3);border:1px solid var(--border);margin-bottom:3px;">'
+      + '<input type="checkbox" value="' + esc(s.email) + '" ' + (emails.indexOf(s.email) > -1 ? 'checked' : '') + ' onchange="grpUpdateCount()" style="accent-color:var(--a1);">'
+      + '<span style="flex:1;min-width:0;font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(s.name) + '</span>'
+      + '<span style="font-size:10px;color:var(--tx4);">' + esc(String(s.email).split('@')[0]) + '</span>'
+      + '</label>';
+  }).join('') || '<div style="color:var(--tx4);font-size:12px;padding:10px;text-align:center;">No students yet.</div>';
+
+  wrap.innerHTML =
+      '<input class="finp" id="grp-name" value="' + esc(_grpEditName) + '" ' + (_grpEditName ? 'disabled' : '') + ' placeholder="Group name *" style="margin-bottom:8px;font-size:12px;">'
+    + (_grpEditName ? '<div style="font-size:10px;color:var(--tx4);margin:-4px 0 8px;">Group names can\'t be changed. Delete and recreate to rename.</div>' : '')
+    + '<input class="finp" id="grp-search" placeholder="Search students by name or email" oninput="grpFilter()" style="margin-bottom:6px;font-size:12px;">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+    +   '<div id="grp-count" style="flex:1;font-size:11px;color:var(--tx3);"></div>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="grpSelectVisible(true)" style="font-size:10px;padding:2px 7px;">Select shown</button>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="grpSelectVisible(false)" style="font-size:10px;padding:2px 7px;">Clear</button>'
+    + '</div>'
+    + '<div id="grp-rows" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px;margin-bottom:8px;">' + rows + '</div>'
+    + '<div id="grp-msg" style="font-size:11px;min-height:14px;margin-bottom:6px;color:#f87171;"></div>'
+    + '<button id="grp-save-btn" onclick="saveGrpInline()" style="width:100%;padding:8px 10px;background:#4f46e5;color:#fff;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">'
+    +   (_grpEditName ? 'Save Changes' : 'Create Group') + '</button>';
+
+  grpUpdateCount();
+}
+
+// Hide non-matching rows; checkmarks on hidden rows stay checked.
+function grpFilter(){
+  var q = ((document.getElementById('grp-search') || {}).value || '').trim().toLowerCase();
+  var rows = document.querySelectorAll('#grp-rows label');
+  for (var i = 0; i < rows.length; i++){
+    var hit = !q || (rows[i].dataset.name || '').indexOf(q) > -1 || (rows[i].dataset.email || '').indexOf(q) > -1;
+    rows[i].style.display = hit ? 'flex' : 'none';
+  }
+  grpUpdateCount();
+}
+
+function grpSelectVisible(on){
+  var rows = document.querySelectorAll('#grp-rows label');
+  for (var i = 0; i < rows.length; i++){
+    if (rows[i].style.display === 'none') continue;
+    var cb = rows[i].querySelector('input[type=checkbox]');
+    if (cb) cb.checked = !!on;
+  }
+  grpUpdateCount();
+}
+
+function grpUpdateCount(){
+  var el = document.getElementById('grp-count');
+  if (!el) return;
+  var all = document.querySelectorAll('#grp-rows label');
+  var sel = document.querySelectorAll('#grp-rows input[type=checkbox]:checked').length;
+  var shown = 0;
+  for (var i = 0; i < all.length; i++){ if (all[i].style.display !== 'none') shown++; }
+  el.innerHTML = '<strong style="color:var(--tx2);">' + sel + '</strong> selected'
+    + (shown !== all.length ? ' &middot; showing ' + shown + ' of ' + all.length : '');
+}
+
+// Save from the inline editor. Hidden-but-checked rows are included, so a
+// teacher can search, check a few, search again, check more, then save.
+function saveGrpInline(){
+  var msg = document.getElementById('grp-msg');
+  var btn = document.getElementById('grp-save-btn');
+  msg.style.color = '#f87171';
+
+  var name = _grpEditName || ((document.getElementById('grp-name') || {}).value || '').trim();
+  if (!name){ msg.textContent = 'Enter a group name.'; return; }
+
+  var checked = Array.prototype.slice.call(document.querySelectorAll('#grp-rows input[type=checkbox]:checked'))
+    .map(function(i){ return i.value; });
+  if (!checked.length){ msg.textContent = 'Pick at least one student.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  google.script.run.withSuccessHandler(function(r){
+    btn.disabled = false;
+    btn.textContent = _grpEditName ? 'Save Changes' : 'Create Group';
+    if (r && r.success){
+      toast('Group saved', 'ok');
+      _grpEditName = '';
+      _tGrpTab = 'list';
+      students = []; groups = [];
+      loadStuGroups(function(){
+        renderTGroupsWidget();
+        // Refresh every dropdown that lists groups, so a new group is
+        // immediately usable without reloading the page.
+        if (typeof twRenderPTDet    === 'function') twRenderPTDet();
+        if (typeof twLinkRenderDet  === 'function') twLinkRenderDet();
+        if (typeof twRemRenderDet   === 'function') twRemRenderDet();
+        if (typeof twEdRenderDet    === 'function') twEdRenderDet();
+        if (typeof aEdRenderDet     === 'function') aEdRenderDet();
+      });
+    } else {
+      msg.style.color = '#f87171';
+      msg.textContent = (r && r.error) || 'Could not save group.';
+    }
+  }).withFailureHandler(function(e){
+    btn.disabled = false;
+    btn.textContent = _grpEditName ? 'Save Changes' : 'Create Group';
+    msg.style.color = '#f87171';
+    msg.textContent = (e && e.message) || 'Server error.';
+  }).saveGroup(name, checked);
 }
 
 // Push Tasks widget — title/subject/priority/date/notes form + target picker.
@@ -435,31 +794,173 @@ function renderTReminderWidget(){
   twRemRenderDet();
 }
 
-// ── ROW Approvals (teacher) ─────────────────────────────────────
-// Follows the pattern of the other teacher widget renderers: finds
-// its own container (#tw-rowapprovals) created by buildTeacherDashboard,
-// injects the card HTML directly, then triggers loadRowApprovals to
-// fetch the pending requests from the server.
+// One tab button. File-folder styling: rounded top corners, the active
+// tab filled with the accent color, inactive tabs muted and flat.
+function rowTabBtn(id, label){
+  var on = _tRowTab === id;
+  var badge = '';
+  if (id === 'pending' && typeof _rowPendingCache !== 'undefined' && _rowPendingCache && _rowPendingCache.length){
+    badge = '<span style="display:inline-block;margin-left:6px;min-width:18px;padding:1px 6px;border-radius:99px;font-size:10px;font-weight:800;background:' + (on ? 'rgba(255,255,255,.28)' : '#f59e0b') + ';color:#fff;vertical-align:1px;">' + _rowPendingCache.length + '</span>';
+  }
+  return '<div onclick="tRowTab(\'' + id + '\')" style="'
+    + 'flex:1;text-align:center;cursor:pointer;user-select:none;'
+    + 'padding:11px 10px 10px;font-size:13px;font-weight:700;letter-spacing:.2px;'
+    + 'border-radius:10px 10px 0 0;font-family:inherit;'
+    + 'background:' + (on ? 'var(--a1)' : 'rgba(255,255,255,.04)') + ';'
+    + 'color:'      + (on ? '#ffffff'  : 'var(--tx3)') + ';'
+    + 'border:1px solid ' + (on ? 'var(--a1)' : 'var(--border)') + ';border-bottom:none;'
+    + 'box-shadow:' + (on ? '0 -2px 10px rgba(99,102,241,.35)' : 'none') + ';'
+    + 'transition:background .15s,color .15s;'
+    + '">' + label + badge + '</div>';
+}
+
+// ROW Approvals widget — two tabs: Approvals (student requests) and
+// Give ROWs (teacher awards directly, no request needed).
 function renderTRowApprovalsWidget(){
   var host = document.getElementById('tw-rowapprovals');
   if (!host) return;
 
-  // Inject the card content. We're inside tw-rowapprovals which is already
-  // inside the tile's card div, so we render the card-top + body directly.
-  host.innerHTML =
-    '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 0 8px;border-bottom:1px solid var(--border);margin-bottom:8px;">'
+  // The tile body isn't a flex container by default, so flex:1 on the
+  // inner panels does nothing and tall content gets clipped by the card's
+  // overflow:hidden. Force it here so both tabs scroll inside the tile.
+  host.style.display       = 'flex';
+  host.style.flexDirection = 'column';
+  host.style.minHeight     = '0';
+
+  var tabBar = '<div style="display:flex;gap:5px;border-bottom:3px solid var(--a1);margin-bottom:10px;flex-shrink:0;">'
+    + rowTabBtn('pending', 'Approvals')
+    + rowTabBtn('award',   'Give ROWs')
+    + '</div>';
+
+  if (_tRowTab === 'award'){
+    host.innerHTML = tabBar + '<div id="row-award-wrap" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"></div>';
+    renderRowAwardForm();
+    return;
+  }
+
+  host.innerHTML = tabBar
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 0 8px;border-bottom:1px solid var(--border);margin-bottom:8px;flex-shrink:0;">'
       + '<div style="font-size:11px;font-weight:600;color:var(--tx2);">Pending Requests</div>'
       + '<div style="display:flex;gap:4px;">'
-        + '<button class="btn btn-ghost btn-sm" onclick="rowDebugUser()" title="DEBUG: Show my user info" style="background:#fbbf24;color:#000;font-size:11px;padding:2px 6px;">👤</button>'
-        + '<button class="btn btn-ghost btn-sm" onclick="rowDebug()" title="DEBUG: Test server call" style="background:#fbbf24;color:#000;font-size:11px;padding:2px 6px;">🔍</button>'
-        + '<button class="btn btn-ghost btn-sm" onclick="openRowHistoryModal()" title="View past approvals" style="font-size:11px;padding:2px 6px;">History</button>'
-        + '<button class="btn btn-ghost btn-sm" onclick="loadRowApprovals()" title="Refresh" style="font-size:11px;padding:2px 6px;"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4M3 7a6 6 0 1 1 1 6"/></svg></button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="openRowHistoryModal()" style="font-size:11px;padding:2px 6px;">History</button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="loadRowApprovals()" style="font-size:11px;padding:2px 6px;">Refresh</button>'
       + '</div>'
     + '</div>'
-    + '<div id="row-approvals-body" style="flex:1;min-height:0;overflow-y:auto;"><div class="empty"><p style="font-size:12px;color:var(--tx3);">Loading requests...</p></div></div>';
+    + '<div id="row-approvals-body" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px;"><div class="empty"><p style="font-size:12px;color:var(--tx3);">Loading requests...</p></div></div>';
 
-  // Now that #row-approvals-body exists in the DOM, fire the data load
   if (typeof loadRowApprovals === 'function') loadRowApprovals();
+}
+
+// Switch tabs on the ROW widget.
+function tRowTab(t){ _tRowTab = t; renderTRowApprovalsWidget(); }
+
+// Build the Give ROWs form shell. The student list is filled separately
+// by rowAwardRenderList so typing in the search box doesn't lose focus.
+function renderRowAwardForm(){
+  var wrap = document.getElementById('row-award-wrap');
+  if (!wrap) return;
+
+  function catBtn(c){
+    var on = _rowAwardCat === c;
+    return '<div onclick="rowAwardCat(\'' + c + '\')" style="flex:1;text-align:center;padding:6px 4px;border-radius:7px;cursor:pointer;font-size:11px;font-weight:600;border:1px solid ' + (on ? 'var(--a1)' : 'var(--border)') + ';background:' + (on ? 'var(--a3)' : 'transparent') + ';color:' + (on ? 'var(--a2)' : 'var(--tx3)') + ';">' + c + '</div>';
+  }
+
+  wrap.innerHTML =
+      '<input class="finp" id="row-award-search" placeholder="Search students by name or email" oninput="rowAwardRenderList()" style="margin-bottom:6px;font-size:12px;">'
+    + '<div id="row-award-list" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px;margin-bottom:8px;"></div>'
+    + '<div id="row-award-chip" style="margin-bottom:8px;"></div>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--tx3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">Category</div>'
+    + '<div style="display:flex;gap:5px;margin-bottom:8px;">' + catBtn('Respect') + catBtn('Ownership') + catBtn('Teamwork') + '</div>'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">'
+    +   '<div style="font-size:11px;color:var(--tx3);">ROWs</div>'
+    +   '<input class="finp" type="number" id="row-award-amt" value="1" min="1" max="10" style="width:60px;text-align:center;font-size:12px;">'
+    + '</div>'
+    + '<textarea class="fta" id="row-award-desc" placeholder="What did they do? (optional but recommended)" style="min-height:52px;font-size:12px;margin-bottom:8px;" maxlength="500"></textarea>'
+    + '<div id="row-award-msg" style="font-size:11px;min-height:14px;margin-bottom:6px;color:#f87171;"></div>'
+    + '<button id="row-award-btn" onclick="submitRowAward()" style="width:100%;padding:8px 10px;background:#4f46e5;color:#fff;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Give ROW</button>';
+
+  rowAwardRenderList();
+  rowAwardRenderChip();
+}
+
+// Render the filtered student list.
+function rowAwardRenderList(){
+  var el = document.getElementById('row-award-list');
+  if (!el) return;
+
+  var list = (typeof students !== 'undefined' && students) ? students : [];
+  if (!list.length){
+    el.innerHTML = '<div style="color:var(--tx4);font-size:11px;padding:10px;text-align:center;">No students loaded.</div>';
+    return;
+  }
+
+  var q = ((document.getElementById('row-award-search') || {}).value || '').trim().toLowerCase();
+  var filtered = q ? list.filter(function(s){
+    return String(s.name || '').toLowerCase().indexOf(q) > -1
+        || String(s.email || '').toLowerCase().indexOf(q) > -1;
+  }) : list;
+
+  if (!filtered.length){
+    el.innerHTML = '<div style="color:var(--tx4);font-size:11px;padding:10px;text-align:center;">No matches.</div>';
+    return;
+  }
+
+  el.innerHTML = filtered.slice(0, 60).map(function(s){
+    var on = s.email === _rowAwardSel;
+    return '<div onclick="rowAwardPick(\'' + esc(s.email) + '\')" style="padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:2px;background:' + (on ? 'var(--a3)' : 'transparent') + ';color:' + (on ? 'var(--a2)' : 'var(--tx2)') + ';">'
+      + '<div style="font-weight:600;">' + esc(s.name) + '</div>'
+      + '<div style="font-size:10px;color:var(--tx4);">' + esc(s.email) + '</div>'
+      + '</div>';
+  }).join('') + (filtered.length > 60 ? '<div style="font-size:10px;color:var(--tx4);padding:5px;text-align:center;">+' + (filtered.length - 60) + ' more — keep typing to narrow</div>' : '');
+}
+
+// Show who's currently selected.
+function rowAwardRenderChip(){
+  var el = document.getElementById('row-award-chip');
+  if (!el) return;
+  if (!_rowAwardSel){ el.innerHTML = '<div style="font-size:11px;color:var(--tx4);">No student selected yet.</div>'; return; }
+  var name = _rowAwardSel;
+  var list = (typeof students !== 'undefined' && students) ? students : [];
+  for (var i = 0; i < list.length; i++){ if (list[i].email === _rowAwardSel){ name = list[i].name; break; } }
+  el.innerHTML = '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--a3);border:1px solid var(--a4);color:var(--a2);border-radius:99px;padding:3px 10px;font-size:11px;font-weight:600;">Giving to: ' + esc(name) + '</div>';
+}
+
+function rowAwardPick(email){ _rowAwardSel = email; rowAwardRenderList(); rowAwardRenderChip(); }
+function rowAwardCat(c){ _rowAwardCat = c; renderRowAwardForm(); }
+
+// Submit the award.
+function submitRowAward(){
+  var msg = document.getElementById('row-award-msg');
+  var btn = document.getElementById('row-award-btn');
+  msg.style.color = '#f87171';
+
+  if (!_rowAwardSel){ msg.textContent = 'Pick a student from the list first.'; return; }
+  var amt = parseInt((document.getElementById('row-award-amt') || {}).value, 10);
+  if (isNaN(amt) || amt < 1 || amt > 10){ msg.textContent = 'ROWs must be between 1 and 10.'; return; }
+  var desc = ((document.getElementById('row-award-desc') || {}).value || '').trim();
+
+  btn.disabled = true;
+  btn.textContent = 'Giving...';
+  msg.style.color = 'var(--tx3)';
+  msg.textContent = 'Saving...';
+
+  google.script.run.withSuccessHandler(function(r){
+    btn.disabled = false;
+    btn.textContent = 'Give ROW';
+    if (r && r.success){
+      toast('+' + amt + ' ROW to ' + (r.studentName || 'student') + ' (now ' + r.newBalance + ')', 'ok');
+      _rowAwardSel = '';
+      renderRowAwardForm();
+    } else {
+      msg.style.color = '#f87171';
+      msg.textContent = (r && r.error) || 'Could not give ROW.';
+    }
+  }).withFailureHandler(function(e){
+    btn.disabled = false;
+    btn.textContent = 'Give ROW';
+    msg.style.color = '#f87171';
+    msg.textContent = (e && e.message) || 'Server error.';
+  }).awardRow(_rowAwardSel, amt, _rowAwardCat, desc);
 }
 
 
@@ -944,15 +1445,67 @@ function openGrpModal(editName){
   document.getElementById('m-gn').disabled = !!editName; // can't rename existing groups
   document.getElementById('gm-title').textContent = editName ? 'Edit "' + editName + '"' : 'New Group';
 
-  document.getElementById('grp-list').innerHTML = students.map(function(s){
-    return '<label style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer;background:var(--bg3);border:1px solid var(--border);">'
-      + '<input type="checkbox" value="' + esc(s.email) + '" ' + (emails.indexOf(s.email) > -1 ? 'checked' : '') + ' >'
+  var rows = students.map(function(s){
+    return '<label data-name="' + esc(String(s.name || '').toLowerCase()) + '" data-email="' + esc(String(s.email || '').toLowerCase()) + '" '
+      + 'style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer;background:var(--bg3);border:1px solid var(--border);margin-bottom:4px;">'
+      + '<input type="checkbox" value="' + esc(s.email) + '" ' + (emails.indexOf(s.email) > -1 ? 'checked' : '') + ' onchange="grpUpdateCount()">'
       + '<span style="font-size:13px;font-weight:500;">' + esc(s.name) + '</span>'
       + '<span style="font-size:11px;color:var(--tx4);">' + esc(s.email) + '</span>'
       + '</label>';
   }).join('') || '<div style="color:var(--tx4);">No students yet.</div>';
 
+  document.getElementById('grp-list').innerHTML =
+      '<div style="position:sticky;top:0;background:var(--bg2);padding:0 0 7px;z-index:2;">'
+    +   '<input class="finp" id="grp-search" placeholder="Search by name or email" oninput="grpFilter()" style="font-size:12px;margin-bottom:6px;">'
+    +   '<div style="display:flex;align-items:center;gap:8px;">'
+    +     '<div id="grp-count" style="flex:1;font-size:11px;color:var(--tx3);"></div>'
+    +     '<button class="btn btn-ghost btn-sm" onclick="grpSelectVisible(true)" style="font-size:10px;padding:2px 7px;">Select shown</button>'
+    +     '<button class="btn btn-ghost btn-sm" onclick="grpSelectVisible(false)" style="font-size:10px;padding:2px 7px;">Clear</button>'
+    +   '</div>'
+    + '</div>'
+    + '<div id="grp-rows">' + rows + '</div>';
+
+  grpUpdateCount();
   openModal('group-modal');
+  var gs = document.getElementById('grp-search');
+  if (gs) gs.focus();
+}
+
+// Hide non-matching rows. Hiding (rather than re-rendering) keeps
+// checkmarks intact while the teacher types.
+function grpFilter(){
+  var q = ((document.getElementById('grp-search') || {}).value || '').trim().toLowerCase();
+  var rows = document.querySelectorAll('#grp-rows label');
+  for (var i = 0; i < rows.length; i++){
+    var hit = !q
+      || (rows[i].dataset.name  || '').indexOf(q) > -1
+      || (rows[i].dataset.email || '').indexOf(q) > -1;
+    rows[i].style.display = hit ? 'flex' : 'none';
+  }
+  grpUpdateCount();
+}
+
+// Check or uncheck every currently-visible row.
+function grpSelectVisible(on){
+  var rows = document.querySelectorAll('#grp-rows label');
+  for (var i = 0; i < rows.length; i++){
+    if (rows[i].style.display === 'none') continue;
+    var cb = rows[i].querySelector('input[type=checkbox]');
+    if (cb) cb.checked = !!on;
+  }
+  grpUpdateCount();
+}
+
+// "N selected" readout, plus a count of what the filter is showing.
+function grpUpdateCount(){
+  var el = document.getElementById('grp-count');
+  if (!el) return;
+  var all = document.querySelectorAll('#grp-rows label');
+  var sel = document.querySelectorAll('#grp-rows input[type=checkbox]:checked').length;
+  var shown = 0;
+  for (var i = 0; i < all.length; i++){ if (all[i].style.display !== 'none') shown++; }
+  el.innerHTML = '<strong style="color:var(--tx2);">' + sel + '</strong> selected'
+    + (shown !== all.length ? ' &middot; showing ' + shown + ' of ' + all.length : '');
 }
 
 // Save the group from the modal (creates or updates) and refresh.
@@ -977,11 +1530,23 @@ function doSaveGroup(){
 function doDelGroup(name){
   if (!confirm('Delete group "' + name + '"?')) return;
   google.script.run.withSuccessHandler(function(r){
-    if (r.success){
+    if (r && r.success){
       toast('Deleted', 'inf');
       students = []; groups = [];
-      buildGroupsPage();
-    }
+      _grpEditName = '';
+      _tGrpTab = 'list';
+      students = []; groups = [];
+      loadStuGroups(function(){
+        renderTGroupsWidget();
+        // Refresh every dropdown that lists groups, so a new group is
+        // immediately usable without reloading the page.
+        if (typeof twRenderPTDet    === 'function') twRenderPTDet();
+        if (typeof twLinkRenderDet  === 'function') twLinkRenderDet();
+        if (typeof twRemRenderDet   === 'function') twRemRenderDet();
+        if (typeof twEdRenderDet    === 'function') twEdRenderDet();
+        if (typeof aEdRenderDet     === 'function') aEdRenderDet();
+      });
+    } else toast((r && r.error) || 'Could not delete', 'err');
   }).deleteGroup(name);
 }
 
@@ -1080,7 +1645,5 @@ function loadStuGroups(cb){
     }).getStudentList();
   }).getStuGroupData();
 }
-
-</script>
 
 </script>

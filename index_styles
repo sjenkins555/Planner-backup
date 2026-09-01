@@ -2221,7 +2221,11 @@ body[data-ui-style="sunrise-dark"] .style-footer {border-top-color:rgba(240,200,
 .t-widget-body .fg{margin-bottom:9px}
 .t-widget-body .target-row{display:flex;gap:5px;margin-bottom:8px;flex-wrap:wrap}
 .t-widget-body .topt{flex:1;min-width:70px;padding:6px 4px;font-size:11px;line-height:1.3}
-.t-widget-scroll{max-height:360px;overflow-y:auto;margin-right:-6px;padding-right:6px}
+/* Fill the tile instead of capping at a fixed height — a 2x3 tile is
+   ~554px tall, so the old 360px cap left dead space and clipped content.
+   The card is a flex column, so flex:1 + min-height:0 makes this scroll
+   to exactly the tile's height at any size. */
+.t-widget-scroll{flex:1;min-height:0;overflow-y:auto;margin-right:-6px;padding-right:6px}
 .t-widget-scroll::-webkit-scrollbar{width:6px}
 .t-widget-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px}
 
@@ -3170,5 +3174,199 @@ body[data-ui-style="sunrise"]  .widget-loader-overlay{background:rgba(255,255,25
 /* Upcoming reminders (not yet ripe) — slightly faded */
 .rem-row.upcoming{opacity:.72}
 .rem-row.upcoming .rem-pill{background:rgba(120,120,120,.18);color:inherit}
+
+/* ═══════════════════════════════════════════════════════════════════
+   47. CONTRAST FIXES
+   --tx3/--tx4 were dark slate: too dim on dark themes, and on light
+   themes the primary text vars flipped light while these stayed dark.
+   Raised here for both directions. Must stay last so it wins.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Dark themes — lift the muted text ramp */
+:root{
+  --tx3:#94a3b8;
+  --tx4:#7c8ca3;
+}
+
+/* Light themes — dark text ramp instead */
+body[data-ui-style="zen"],
+body[data-ui-style="notebook"],
+body[data-ui-style="sunrise"]{
+  --tx:#16202e;
+  --tx2:#39465a;
+  --tx3:#5a687c;
+  --tx4:#6d7b8f;
+}
+
+/* Inputs inherit the theme's primary text color instead of a fixed one */
+.finp, .fsel, .fta,
+input[type=text], input[type=number], input[type=date],
+input[type=time], input[type=datetime-local], textarea, select{
+  color:var(--tx)!important;
+}
+.finp::placeholder, .fta::placeholder, textarea::placeholder, input::placeholder{
+  color:var(--tx3)!important;
+  opacity:1;
+}
+
+/* Light themes need light input fields too, or dark text sits on a dark box */
+body[data-ui-style="zen"] .finp,     body[data-ui-style="zen"] .fsel,     body[data-ui-style="zen"] .fta,
+body[data-ui-style="notebook"] .finp,body[data-ui-style="notebook"] .fsel,body[data-ui-style="notebook"] .fta,
+body[data-ui-style="sunrise"] .finp, body[data-ui-style="sunrise"] .fsel, body[data-ui-style="sunrise"] .fta{
+  background:rgba(255,255,255,.92)!important;
+  border-color:rgba(0,0,0,.18)!important;
+}
+
+/* Widget titles — always full-strength, never the muted ramp */
+.card-lbl{color:var(--tx)!important;font-weight:600}
+
+/* ═══════════════════════════════════════════════════════════════════
+   48. PICKER ROW READABILITY
+   Group picker and ROW award rows set background:var(--bg3) inline and
+   use --tx4 for the email line — the faintest value in the ramp. Both
+   end up low-contrast. Force a card that follows the theme and bump the
+   secondary line up two steps.
+   ═══════════════════════════════════════════════════════════════════ */
+
+#grp-rows label,
+#row-award-list > div{
+  background:rgba(255,255,255,.06)!important;
+  border-color:var(--border)!important;
+}
+#grp-rows label span:first-of-type,
+#row-award-list > div > div:first-child{
+  color:var(--tx)!important;
+  font-weight:600;
+}
+#grp-rows label span:last-of-type,
+#row-award-list > div > div:last-child{
+  color:var(--tx2)!important;
+}
+
+/* Bright themes: light card, dark text */
+body[data-ui-style="zen"]      #grp-rows label,
+body[data-ui-style="notebook"] #grp-rows label,
+body[data-ui-style="sunrise"]  #grp-rows label,
+body[data-ui-style="zen"]      #row-award-list > div,
+body[data-ui-style="notebook"] #row-award-list > div,
+body[data-ui-style="sunrise"]  #row-award-list > div{
+  background:rgba(255,255,255,.90)!important;
+  border-color:rgba(0,0,0,.16)!important;
+}
+body[data-ui-style="zen"]      #grp-rows label span:first-of-type,
+body[data-ui-style="notebook"] #grp-rows label span:first-of-type,
+body[data-ui-style="sunrise"]  #grp-rows label span:first-of-type,
+body[data-ui-style="zen"]      #row-award-list > div > div:first-child,
+body[data-ui-style="notebook"] #row-award-list > div > div:first-child,
+body[data-ui-style="sunrise"]  #row-award-list > div > div:first-child{
+  color:#16202e!important;
+}
+body[data-ui-style="zen"]      #grp-rows label span:last-of-type,
+body[data-ui-style="notebook"] #grp-rows label span:last-of-type,
+body[data-ui-style="sunrise"]  #grp-rows label span:last-of-type,
+body[data-ui-style="zen"]      #row-award-list > div > div:last-child,
+body[data-ui-style="notebook"] #row-award-list > div > div:last-child,
+body[data-ui-style="sunrise"]  #row-award-list > div > div:last-child{
+  color:#374151!important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   49. EASTER EGG WIDGET TEXT
+   Was 10px on --tx3 — the faintest color at the smallest size, which
+   washed out on bright themes and strained on dark ones.
+   ═══════════════════════════════════════════════════════════════════ */
+.aeggs-lbl{
+  display:inline-block;font-size:10px;font-weight:800;letter-spacing:.5px;
+  text-transform:uppercase;color:var(--a2);
+  background:var(--a3);border:1px solid var(--a4);
+  border-radius:4px;padding:1px 6px;margin-right:5px;vertical-align:1px
+}
+.aeggs-txt{color:var(--tx2)}
+.aeggs-card code{
+  font-family:'DM Mono',monospace;font-size:11px;
+  background:rgba(99,102,241,.16);border:1px solid var(--a4);
+  color:var(--a2);border-radius:4px;padding:1px 5px;white-space:nowrap
+}
+
+/* Bright themes — light card, dark text, darker code chip */
+body[data-ui-style="zen"]      .aeggs-card,
+body[data-ui-style="notebook"] .aeggs-card,
+body[data-ui-style="sunrise"]  .aeggs-card{
+  background:rgba(255,255,255,.92)!important;
+  border-color:rgba(0,0,0,.16)!important
+}
+body[data-ui-style="zen"]      .aeggs-txt,
+body[data-ui-style="notebook"] .aeggs-txt,
+body[data-ui-style="sunrise"]  .aeggs-txt{color:#39465a}
+body[data-ui-style="zen"]      .aeggs-card code,
+body[data-ui-style="notebook"] .aeggs-card code,
+body[data-ui-style="sunrise"]  .aeggs-card code{
+  background:rgba(79,70,229,.12);color:#3730a3;border-color:rgba(79,70,229,.35)
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   50. REPORT PRINT VIEW
+   ═══════════════════════════════════════════════════════════════════ */
+#rpt-print{position:fixed;inset:0;z-index:9000;background:#fff;color:#111;overflow:auto;font-family:'DM Sans',sans-serif}
+#rpt-print .rpt-bar{position:sticky;top:0;display:flex;gap:8px;align-items:center;padding:10px 16px;background:#f1f5f9;border-bottom:1px solid #cbd5e1;z-index:2}
+#rpt-print .rpt-btn{padding:7px 16px;background:#4f46e5;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+#rpt-print .rpt-btn.ghost{background:transparent;color:#334155;border:1px solid #cbd5e1}
+#rpt-print .rpt-page{max-width:800px;margin:0 auto;padding:26px 22px 60px}
+#rpt-print .rpt-h1{font-size:23px;font-weight:800;margin-bottom:4px;color:#111}
+#rpt-print .rpt-h2{font-size:16px;font-weight:700;margin:24px 0 10px;padding-bottom:5px;border-bottom:2px solid #4f46e5;color:#111}
+#rpt-print .rpt-h3{font-size:13px;font-weight:700;margin:16px 0 6px;color:#334155}
+#rpt-print .rpt-sub{font-size:12px;color:#475569;margin-bottom:3px}
+/* Neutralise the dark-theme inline colors inside the print view */
+#rpt-print .rpt-row{border-bottom:1px solid #e2e8f0!important}
+#rpt-print .rpt-row div{color:#1e293b!important}
+#rpt-print .rpt-row{background:transparent!important}
+#rpt-print .rpt-row:nth-of-type(even){background:#f1f5f9!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+#rpt-print [style*="f87171"]{color:#b91c1c!important}
+#rpt-print [style*="--a2"]{color:#4338ca!important}
+
+@media print{
+  body > *:not(#rpt-print){display:none!important}
+  #rpt-print{position:static!important;overflow:visible!important}
+  #rpt-print .rpt-bar{display:none!important}
+  #rpt-print .rpt-page{max-width:none;padding:0}
+  #rpt-print .rpt-break{page-break-before:always}
+  #rpt-print .rpt-row{page-break-inside:avoid}
+  @page{margin:0.5in}
+}
+/* ROW admin widget — bright-theme readability */
+body[data-ui-style="zen"]      .rowadm-item,
+body[data-ui-style="notebook"] .rowadm-item,
+body[data-ui-style="sunrise"]  .rowadm-item{
+  background:rgba(255,255,255,.92)!important;border-color:rgba(0,0,0,.16)!important
+}
+body[data-ui-style="zen"]      .rowadm-name,
+body[data-ui-style="notebook"] .rowadm-name,
+body[data-ui-style="sunrise"]  .rowadm-name{color:#16202e!important}
+body[data-ui-style="zen"]      .rowadm-sub,
+body[data-ui-style="notebook"] .rowadm-sub,
+body[data-ui-style="sunrise"]  .rowadm-sub,
+body[data-ui-style="zen"]      .rowadm-hdr,
+body[data-ui-style="notebook"] .rowadm-hdr,
+body[data-ui-style="sunrise"]  .rowadm-hdr{color:#4a5568!important}
+
+/* Inline spinner inside a ROW admin row */
+.rowadm-item .spinner{
+  width:16px;height:16px;border-width:2px;
+  border-color:rgba(255,255,255,.15);border-top-color:var(--a2);
+  display:inline-block;
+}
+
+/* Hide native number spinners on the ROW admin quantity boxes.
+   Chrome/Safari use the ::-webkit- pseudo-elements; Firefox needs
+   -moz-appearance:textfield on the input itself. */
+.rowadm-item input[type=number]::-webkit-outer-spin-button,
+.rowadm-item input[type=number]::-webkit-inner-spin-button{
+  -webkit-appearance:none;
+  margin:0;
+}
+.rowadm-item input[type=number]{
+  -moz-appearance:textfield;
+  appearance:textfield;
+}
 
 </style>
